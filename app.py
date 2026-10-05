@@ -223,6 +223,7 @@ with tab_main:
                     mapping[key] = None if sel == "(nessuna)" else sel
 
             values = {}
+            role_data = {}
             if roles and not selected_archive:
                 try:
                     xls_content = st.session_state.get("uploaded_xls")
@@ -279,6 +280,7 @@ with tab_main:
                         values[key] = core.format_field_value(
                             base, _render_field_widget(base, label, init, k)
                         )
+                    role_data[role] = {"person": person, "carica": carica, "keys": keys}
                     visible_role_keys = [
                         key for key in keys if not core.is_anagraphic_field(key)
                     ]
@@ -309,6 +311,41 @@ with tab_main:
 
             if not placeholders:
                 st.warning("Nessun segnaposto trovato (es. [NOME], [COGNOME]).")
+
+            if archive_database_url and not archive_error and not selected_archive and rec and "LR" in role_data:
+                with st.expander("Salva questa anagrafica nell'archivio"):
+                    owners_to_save = []
+                    for role, info in role_data.items():
+                        if not role.startswith("TE") or not info["person"]:
+                            continue
+                        pct_key = next(
+                            (k for k in info["keys"] if "PERCENT" in core._norm(core.split_role(k)[0]).upper()),
+                            None,
+                        )
+                        owners_to_save.append({
+                            "person": info["person"],
+                            "percentage": str(values.get(pct_key, "")).replace("%", "").replace(",", ".").strip() if pct_key else "",
+                        })
+                    default_name = core.record_label(ctype, rec)
+                    save_name = st.text_input("Nome della scheda", value=default_name, key=f"doc_save_name_{rid}")
+                    if st.button("Salva anagrafica", key="doc_save_profile"):
+                        try:
+                            core.save_archive_profile(
+                                archive_database_url,
+                                save_name,
+                                {
+                                    "company": rec,
+                                    "legal_representative": role_data["LR"]["person"],
+                                    "representative_role": role_data["LR"]["carica"] or "",
+                                    "owners": owners_to_save,
+                                },
+                            )
+                        except (KeyError, ValueError) as error:
+                            st.error(str(error))
+                        except Exception as error:
+                            st.error(f"Impossibile salvare la scheda: {error}")
+                        else:
+                            st.success("Anagrafica salvata nell'archivio.")
 
             if st.button("Genera documento", type="primary", disabled=invalid_commission):
                 fields = [{"name": k, "tokens": t} for k, t in placeholders.items()]
