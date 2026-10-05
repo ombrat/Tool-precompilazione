@@ -929,10 +929,10 @@ def load_template(name):
 
 
 def load_supabase_document_template(supabase_url, service_role_key, bucket, customer_type):
-    """Load a private Word template from Supabase Storage."""
+    """Load a private Word template, preferring DOCX and falling back to DOC."""
     filenames = {
-        "fisica": "persona-fisica.docx",
-        "giuridica": "persona-giuridica.docx",
+        "fisica": ("persona-fisica.docx", "persona-fisica.doc"),
+        "giuridica": ("persona-giuridica.docx", "persona-giuridica.doc"),
     }
     if customer_type not in filenames:
         raise ValueError(f"Tipo cliente non valido: {customer_type}")
@@ -942,30 +942,34 @@ def load_supabase_document_template(supabase_url, service_role_key, bucket, cust
         raise ValueError("Configura il nome del bucket Supabase Storage.")
 
     base_url = supabase_url.rstrip("/")
-    object_path = urllib.parse.quote(f"{bucket}/{filenames[customer_type]}", safe="/")
-    request = urllib.request.Request(
-        f"{base_url}/storage/v1/object/authenticated/{object_path}",
-        headers={
-            "apikey": service_role_key,
-            "Authorization": f"Bearer {service_role_key}",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            content = response.read()
-    except urllib.error.HTTPError as error:
-        if error.code == 404:
-            raise FileNotFoundError(
-                f"Non trovo {filenames[customer_type]} nel bucket privato "
-                f"'{bucket}' di Supabase Storage."
+    for filename in filenames[customer_type]:
+        object_path = urllib.parse.quote(f"{bucket}/{filename}", safe="/")
+        request = urllib.request.Request(
+            f"{base_url}/storage/v1/object/authenticated/{object_path}",
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                content = response.read()
+        except urllib.error.HTTPError as error:
+            if error.code == 404:
+                continue
+            raise RuntimeError(
+                f"Supabase Storage ha restituito HTTP {error.code} per {filename}."
             ) from error
-        raise RuntimeError(
-            f"Supabase Storage ha restituito HTTP {error.code} "
-            f"per {filenames[customer_type]}."
-        ) from error
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Connessione a Supabase Storage non riuscita: {error.reason}") from error
+        except urllib.error.URLError as error:
+            raise RuntimeError(
+                f"Connessione a Supabase Storage non riuscita: {error.reason}"
+            ) from error
 
-    if not content:
-        raise ValueError(f"Il modello {filenames[customer_type]} è vuoto.")
-    return content
+        if not content:
+            raise ValueError(f"Il modello {filename} è vuoto.")
+        return content, filename
+
+    raise FileNotFoundError(
+        f"Non trovo {', '.join(filenames[customer_type])} nel bucket privato "
+        f"'{bucket}' di Supabase Storage."
+    )

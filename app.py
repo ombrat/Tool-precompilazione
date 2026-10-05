@@ -220,12 +220,11 @@ with tab_main:
         ext = up.name.rsplit(".", 1)[-1].lower()
         source_key = ("upload", up.name, up.size, hashlib.sha256(raw).hexdigest())
     elif remote_template:
-        source_name = (
-            "persona-fisica.docx" if ctype == "fisica" else "persona-giuridica.docx"
+        raw, source_name = remote_template
+        ext = source_name.rsplit(".", 1)[-1].lower()
+        source_key = (
+            "supabase", ctype, source_name, hashlib.sha256(raw).hexdigest()
         )
-        raw = remote_template
-        ext = "docx"
-        source_key = ("supabase", ctype, hashlib.sha256(raw).hexdigest())
         st.caption(f"Modello caricato da Supabase Storage: {source_name}")
     else:
         source_name = raw = ext = source_key = None

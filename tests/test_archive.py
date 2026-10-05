@@ -124,7 +124,7 @@ class SupabaseDocumentTemplateTests(unittest.TestCase):
             "giuridica",
         )
 
-        self.assertEqual(content, b"docx content")
+        self.assertEqual(content, (b"docx content", "persona-giuridica.docx"))
         request = urlopen.call_args.args[0]
         self.assertEqual(
             request.full_url,
@@ -138,7 +138,35 @@ class SupabaseDocumentTemplateTests(unittest.TestCase):
 
     @patch("core.urllib.request.urlopen")
     def test_reports_missing_template(self, urlopen):
-        urlopen.side_effect = urllib.error.HTTPError(
+        urlopen.side_effect = [
+            urllib.error.HTTPError(
+                "https://project.supabase.co/storage/v1/object/authenticated/"
+                "document-templates/persona-fisica.docx",
+                404,
+                "Not Found",
+                {},
+                None,
+            ),
+            urllib.error.HTTPError(
+                "https://project.supabase.co/storage/v1/object/authenticated/"
+                "document-templates/persona-fisica.doc",
+                404,
+                "Not Found",
+                {},
+                None,
+            ),
+        ]
+        with self.assertRaisesRegex(FileNotFoundError, "persona-fisica.docx.*persona-fisica.doc"):
+            core.load_supabase_document_template(
+                "https://project.supabase.co",
+                "service-role-secret",
+                "document-templates",
+                "fisica",
+            )
+
+    @patch("core.urllib.request.urlopen")
+    def test_falls_back_to_doc_template(self, urlopen):
+        docx_not_found = urllib.error.HTTPError(
             "https://project.supabase.co/storage/v1/object/authenticated/"
             "document-templates/persona-fisica.docx",
             404,
@@ -146,13 +174,22 @@ class SupabaseDocumentTemplateTests(unittest.TestCase):
             {},
             None,
         )
-        with self.assertRaisesRegex(FileNotFoundError, "persona-fisica.docx"):
-            core.load_supabase_document_template(
-                "https://project.supabase.co",
-                "service-role-secret",
-                "document-templates",
-                "fisica",
-            )
+        response = urlopen.return_value.__enter__.return_value
+        response.read.return_value = b"legacy doc content"
+        urlopen.side_effect = [
+            docx_not_found,
+            urlopen.return_value,
+        ]
+
+        content = core.load_supabase_document_template(
+            "https://project.supabase.co",
+            "service-role-secret",
+            "document-templates",
+            "fisica",
+        )
+
+        self.assertEqual(content, (b"legacy doc content", "persona-fisica.doc"))
+        self.assertEqual(urlopen.call_count, 2)
 
     def test_rejects_unknown_customer_type(self):
         with self.assertRaisesRegex(ValueError, "Tipo cliente non valido"):
