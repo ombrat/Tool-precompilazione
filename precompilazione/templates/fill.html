@@ -1,0 +1,20 @@
+{% extends "base.html" %}{% block body %}
+<h2>Precompila: {{ cfg.name }}</h2>
+<form method="post">
+<label>Tipo di cliente</label>
+<select name="tipo_cliente" onchange="this.form.elements.action.value='aggiorna';this.form.elements.anagrafica.value='';this.form.submit()">
+{% for t in types %}<option {{ 'selected' if t==client_type }}>{{ t }}</option>{% endfor %}</select>
+<label>Anagrafica</label>
+<select name="anagrafica" onchange="this.form.elements.action.value='aggiorna';this.form.submit()">
+<option value="">— seleziona —</option>
+{% for r in records %}<option value="{{ r._rid }}" {{ 'selected' if selected==r._rid|string }}>{{ r[label_col] }}</option>{% endfor %}</select>
+<input type="hidden" name="action" value="aggiorna">
+<h3>Campi del documento</h3>
+{% for name, f in cfg.fields.items() %}
+<label>{{ f.label }}{% if f.source=='db' %} <small>(da anagrafica: {{ f.column }})</small>{% endif %}</label>
+{% if f.source=='longtext' %}<textarea name="v_{{ name }}" rows="6">{{ values[name] }}</textarea>
+{% else %}<input name="v_{{ name }}" value="{{ values[name] }}">{% endif %}
+{% endfor %}
+<button onclick="this.form.elements.action.value='genera'">Genera documento</button>
+</form>
+{% endblock %}

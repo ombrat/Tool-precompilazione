@@ -1,0 +1,23 @@
+{% extends "base.html" %}{% block body %}
+<h2>Configura: {{ cfg.name }}</h2>
+<form method="post">
+<label>Nome modello</label><input name="name" value="{{ cfg.name }}">
+<h3>Database anagrafiche (SQLite)</h3>
+<label>File database</label><input name="db_path" value="{{ cfg.db.path }}">
+<label>Tabella</label><input name="db_table" value="{{ cfg.db.table }}">
+<label>Colonna tipo cliente (valori: Persona fisica / Persona giuridica)</label><input name="db_type_column" value="{{ cfg.db.type_column }}">
+<label>Colonna da mostrare nell'elenco</label><input name="db_label_column" value="{{ cfg.db.label_column }}">
+<h3>Campi</h3>
+<table><tr><th>Campo</th><th>Etichetta</th><th>Origine</th><th>Colonna DB</th><th>Predefinito</th></tr>
+{% for name, f in cfg.fields.items() %}<tr><td><code>{{ name }}</code></td>
+<td><input name="label_{{ name }}" value="{{ f.label }}"></td>
+<td><select name="source_{{ name }}">
+<option value="db" {{ 'selected' if f.source=='db' }}>Dal database</option>
+<option value="text" {{ 'selected' if f.source=='text' }}>Testo libero</option>
+<option value="longtext" {{ 'selected' if f.source=='longtext' }}>Testo lungo</option></select></td>
+<td><select name="column_{{ name }}"><option value=""></option>
+{% for c in columns %}<option {{ 'selected' if c==f.column }}>{{ c }}</option>{% endfor %}</select></td>
+<td><textarea name="default_{{ name }}" rows="2">{{ f.default }}</textarea></td></tr>{% endfor %}</table>
+<button>Salva</button></form>
+<p><a href="{{ url_for('fill', model_id=model_id) }}">Vai alla precompilazione →</a></p>
+{% endblock %}

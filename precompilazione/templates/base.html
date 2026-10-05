@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="it"><head><meta charset="utf-8"><title>Precompilazione documenti</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem}
+label{display:block;margin:.6rem 0 .2rem;font-weight:600}
+input,select,textarea{width:100%;padding:.4rem;box-sizing:border-box}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:.4rem;text-align:left}
+.flash{background:#fff3cd;padding:.5rem;margin:.5rem 0}button{padding:.5rem 1rem;margin-top:1rem}
+</style></head><body>
+<h1><a href="{{ url_for('index') }}" style="text-decoration:none;color:inherit">Precompilazione documenti</a></h1>
+{% for m in get_flashed_messages() %}<div class="flash">{{ m }}</div>{% endfor %}
+{% block body %}{% endblock %}
+</body></html>

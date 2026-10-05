@@ -1,0 +1,15 @@
+{% extends "base.html" %}{% block body %}
+<h2>Carica un documento Word</h2>
+<p>Nel documento scrivi i campi come <code>{{ '{{nome_campo}}' }}</code>.</p>
+<form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+<label>Nome modello (facoltativo)</label><input name="name">
+<label>File .docx</label><input type="file" name="file" accept=".docx" required>
+<button>Carica</button></form>
+<h2>Modelli</h2>
+{% if not models %}<p>Nessun modello.</p>{% endif %}
+<table>{% for m in models %}<tr><td>{{ m.name }}</td>
+<td><a href="{{ url_for('fill', model_id=m.id) }}">Precompila</a> |
+<a href="{{ url_for('configure', model_id=m.id) }}">Configura</a></td>
+<td><form method="post" action="{{ url_for('delete', model_id=m.id) }}" style="margin:0"
+onsubmit="return confirm('Eliminare?')"><button style="margin:0">Elimina</button></form></td></tr>{% endfor %}</table>
+{% endblock %}
