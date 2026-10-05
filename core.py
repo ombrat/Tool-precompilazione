@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unicodedata
 from decimal import Decimal, InvalidOperation
@@ -118,8 +119,62 @@ def record_label(ctype, rec):
 
 
 # ---------- conversione .doc <-> .docx ----------
+def _convert_with_word(data, src, dst):
+    try:
+        import pythoncom
+        from win32com.client import DispatchEx
+    except ImportError as exc:
+        raise RuntimeError(
+            "Per convertire o visualizzare documenti su Windows è necessario Microsoft Word "
+            "e il pacchetto pywin32. Riavvia Avvia-Tool-Windows.bat per installarlo."
+        ) from exc
+
+    word_formats = {"doc": 0, "docx": 12, "pdf": 17}
+    if dst not in word_formats:
+        raise ValueError(f"Formato Word non supportato: {dst}")
+
+    pythoncom.CoInitialize()
+    word = document = None
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            inp = Path(tmp) / f"in.{src}"
+            inp.write_bytes(data)
+            output = Path(tmp) / f"out.{dst}"
+            try:
+                try:
+                    word = DispatchEx("Word.Application")
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Microsoft Word non è disponibile. Verifica che la versione desktop sia "
+                        "installata, attivata e avviabile con questo account Windows."
+                    ) from exc
+                word.Visible = False
+                word.DisplayAlerts = 0
+                word.AutomationSecurity = 3
+                document = word.Documents.Open(
+                    str(inp), ConfirmConversions=False, ReadOnly=True,
+                    AddToRecentFiles=False, Visible=False,
+                )
+                document.SaveAs2(
+                    FileName=str(output), FileFormat=word_formats[dst], AddToRecentFiles=False
+                )
+                return output.read_bytes()
+            finally:
+                try:
+                    if document is not None:
+                        document.Close(SaveChanges=0)
+                finally:
+                    if word is not None:
+                        word.Quit()
+    finally:
+        pythoncom.CoUninitialize()
+
+
 def convert(data, src, dst):
-    """Converte tra doc, docx e pdf con LibreOffice (richiede soffice nel PATH)."""
+    """Converte documenti usando Word su Windows e LibreOffice sugli altri sistemi."""
+    if sys.platform == "win32":
+        return _convert_with_word(data, src, dst)
+
     profile = BASE / ".lo_profile"
     with tempfile.TemporaryDirectory() as tmp:
         inp = Path(tmp) / f"in.{src}"

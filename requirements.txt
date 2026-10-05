@@ -3,3 +3,4 @@ python-docx
 sqlalchemy
 pymupdf
 xlrd
+pywin32; sys_platform == "win32"

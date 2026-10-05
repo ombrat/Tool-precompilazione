@@ -9,12 +9,12 @@ streamlit run app.py
 ```
 
 ### Avvio locale su Windows
-1. Installa Python 3 e LibreOffice.
+1. Installa Python 3 e Microsoft Word (desktop, installato e attivato).
 2. Estrai tutti i file del pacchetto in una cartella locale.
 3. Fai doppio clic su `Avvia-Tool-Windows.bat`; al primo avvio installa automaticamente le dipendenze e apre il programma nel browser.
 4. Nella scheda **Database**, seleziona il tuo file Excel `.xls`. Il database non è incluso nel pacchetto.
 
-LibreOffice deve essere raggiungibile dal PATH; lo script aggiunge automaticamente il percorso di installazione predefinito `C:\Program Files\LibreOffice\program`.
+Su Windows, l'anteprima e le conversioni `.doc`/`.docx`/PDF vengono eseguite da Microsoft Word tramite automazione COM; non è necessario installare LibreOffice. Lascia Word chiuso mentre lo strumento converte i documenti. Sugli altri sistemi operativi resta utilizzato LibreOffice.
 
 ## Uso
 1. **Configura documento**: carica il .docx (segnaposto `{{campo}}` oppure testo esistente da sostituire); per ogni campo scegli l'origine: colonna del database (per persona fisica/giuridica), testo manuale breve/lungo (premessa, condizioni economiche...) o valore fisso. Salva il modello.

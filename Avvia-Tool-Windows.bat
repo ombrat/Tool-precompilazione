@@ -18,25 +18,14 @@ if not exist ".venv\Scripts\python.exe" (
     )
 )
 
-if exist "%ProgramFiles%\LibreOffice\program" (
-    set "PATH=%ProgramFiles%\LibreOffice\program;%PATH%"
-)
-where soffice >nul 2>nul
-if errorlevel 1 (
-    echo LibreOffice non trovato. E' necessario per anteprima e conversione documenti.
-    echo Installa LibreOffice oppure aggiungi la cartella "program" di LibreOffice al PATH.
-    pause
-    exit /b 1
-)
-
-if not exist ".venv\requirements-installed" (
+if not exist ".venv\requirements-installed-word" (
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt
     if errorlevel 1 (
         echo Installazione delle dipendenze non riuscita.
         pause
         exit /b 1
     )
-    type nul > ".venv\requirements-installed"
+    type nul > ".venv\requirements-installed-word"
 )
 
 ".venv\Scripts\python.exe" -m streamlit run app.py
