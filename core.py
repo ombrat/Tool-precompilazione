@@ -175,6 +175,34 @@ def is_anagraphic_field(name):
     return normalized in PREDEFINED
 
 
+def legal_form_from_company_name(company_name):
+    normalized = _norm(company_name).lower()
+    if re.search(r"(?:^|_)(?:kgaa|kg_?a_?a|kommanditgesellschaft_auf_aktien)$", normalized):
+        return "SOCIETA' IN ACCOMANDITA PER AZIONI"
+    if re.search(r"(?:^|_)(?:gmbh_co_)?kg$", normalized) or re.search(
+        r"(?:^|_)kommanditgesellschaft$", normalized
+    ):
+        return "SOCIETA' IN ACCOMANDITA"
+    if re.search(r"(?:^|_)(?:s_n_c|snc|o_h_g|ohg)$", normalized) or re.search(
+        r"(?:^|_)(?:societa_in_nome_collettivo|offene_handelsgesellschaft)$", normalized
+    ):
+        return "SOCIETA' IN NOME COLLETTIVO"
+    if re.search(r"(?:^|_)(?:s_p_a|spa|ag|aktiengesellschaft)$", normalized) or re.search(
+        r"(?:^|_)societa_per_azioni$", normalized
+    ):
+        return "SOCIETA' PER AZIONI"
+    if re.search(r"(?:^|_)(?:ug(?:_haftungsbeschrankt)?|unternehmergesellschaft)$", normalized):
+        return "SOCIETA' IMPRENDITORIALE A RESPONSABILITA' LIMITATA"
+    if re.search(r"(?:^|_)(?:gmbh|s_r_l_s?|srls?)$", normalized) or re.search(
+        r"(?:^|_)(?:societa_a_responsabilita_limitata|gesellschaft_mit_beschrankter_haftung)$",
+        normalized,
+    ):
+        return "SOCIETA' A RESPONSABILITA' LIMITATA"
+    if re.search(r"(?:^|_)(?:g_b_r|gbr|gesellschaft_burgerlichen_rechts)$", normalized):
+        return "SOCIETA' DI DIRITTO CIVILE"
+    return ""
+
+
 def role_label(role):
     if role == "LR":
         return "Legale rappresentante"
@@ -387,6 +415,7 @@ PREDEFINED = {
     "NOME_SOCIETA": ["ragione_sociale", "denominazione", "cognome"],
     "NOME_DELLA_SOCIETA": ["ragione_sociale", "denominazione", "cognome"],
     "DENOMINAZIONE": ["ragione_sociale", "nome_societa", "cognome"],
+    "FORMA_GIURIDICA": [],
     "SEDE_LEGALE": ["sede_legale"],
     "CODICE_FISCALE": ["codice_fiscale", "cf"],
     "PARTITA_IVA": ["partita_iva", "piva"],

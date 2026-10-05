@@ -48,7 +48,14 @@ def _render_field_widget(name, label, initial, widget_key, multiline=False):
 def _render_document_field(key, record, mapping, record_id):
     label = key.replace("_", " ").capitalize()
     col = mapping.get(key)
-    initial = core.format_field_value(key, record.get(col) if col else None)
+    if core._norm(key).upper() == "FORMA_GIURIDICA":
+        company_name_column = core.guess_column(
+            "RAGIONE_SOCIALE", record.keys(), "giuridica"
+        )
+        company_name = record.get(company_name_column) if company_name_column else None
+        initial = core.legal_form_from_company_name(company_name)
+    else:
+        initial = core.format_field_value(key, record.get(col) if col else None)
     widget_key = f"v_{record_id}_{key}{_field_widget_revision(key)}"
     raw_value = _render_field_widget(
         key, label, initial, widget_key, multiline=core._norm(key).upper() not in core.PREDEFINED
@@ -73,9 +80,13 @@ with tab_main:
         raw = up.getvalue()
         ext = up.name.rsplit(".", 1)[-1].lower()
         with st.spinner("Lettura del documento..."):
+            doc = core.convert(raw, "doc", "docx") if ext == "doc" else raw
+            has_role_placeholders = any(
+                core.split_role(key)[1] for key in core.find_placeholders(doc)
+            )
             st.session_state.update(
-                doc=core.convert(raw, "doc", "docx") if ext == "doc" else raw,
-                fmt=ext, upkey=(up.name, up.size), out=None,
+                doc=doc, fmt=ext, upkey=(up.name, up.size), out=None,
+                customer_type="giuridica" if has_role_placeholders else "fisica",
             )
 
     if up:
@@ -95,7 +106,7 @@ with tab_main:
             st.subheader("Dati")
             ctype = st.radio(
                 "Tipo di cliente", list(core.CUSTOMER_TYPES),
-                format_func=core.CUSTOMER_TYPES.get, horizontal=True,
+                format_func=core.CUSTOMER_TYPES.get, horizontal=True, key="customer_type",
             )
             roles = core.roles_for_customer_type(roles, ctype)
             try:
@@ -116,6 +127,9 @@ with tab_main:
             mapping = {}
             with st.expander("Collegamento campi / colonne database"):
                 for key in main_keys:
+                    if core._norm(key).upper() == "FORMA_GIURIDICA":
+                        mapping[key] = None
+                        continue
                     opts = ["(nessuna)"] + cols
                     g = core.guess_column(key, cols, ctype)
                     key_revision = _field_widget_revision(key)
