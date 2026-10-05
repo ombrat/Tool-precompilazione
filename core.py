@@ -942,23 +942,28 @@ def load_supabase_document_template(supabase_url, service_role_key, bucket, cust
         raise ValueError("Configura il nome del bucket Supabase Storage.")
 
     base_url = supabase_url.rstrip("/")
+    headers = {"apikey": service_role_key}
+    if not service_role_key.startswith("sb_"):
+        headers["Authorization"] = "Bearer " + service_role_key
+
     for filename in filenames[customer_type]:
         object_path = urllib.parse.quote(f"{bucket}/{filename}", safe="/")
         request = urllib.request.Request(
             f"{base_url}/storage/v1/object/authenticated/{object_path}",
-            headers={
-                "apikey": service_role_key,
-                "Authorization": f"Bearer {service_role_key}",
-            },
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 content = response.read()
         except urllib.error.HTTPError as error:
-            if error.code == 404:
+            body = error.read().decode("utf-8", "replace")
+            # Storage può rispondere 400 con statusCode 404 nel corpo.
+            if error.code == 404 or (
+                error.code == 400 and re.search(r"not[_ ]found|\"statusCode\"\s*:\s*\"?404", body, re.I)
+            ):
                 continue
             raise RuntimeError(
-                f"Supabase Storage ha restituito HTTP {error.code} per {filename}."
+                f"Supabase Storage ha restituito HTTP {error.code} per {filename}: {body[:300]}"
             ) from error
         except urllib.error.URLError as error:
             raise RuntimeError(

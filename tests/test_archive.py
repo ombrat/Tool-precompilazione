@@ -1,3 +1,4 @@
+import io
 import tempfile
 import urllib.error
 import unittest
@@ -190,6 +191,28 @@ class SupabaseDocumentTemplateTests(unittest.TestCase):
 
         self.assertEqual(content, (b"legacy doc content", "persona-fisica.doc"))
         self.assertEqual(urlopen.call_count, 2)
+
+    @patch("core.urllib.request.urlopen")
+    def test_treats_storage_400_not_found_as_missing_and_omits_bearer_for_sb_keys(self, urlopen):
+        body = b'{"statusCode":"404","error":"not_found","message":"Object not found"}'
+        not_found = urllib.error.HTTPError(
+            "https://project.supabase.co/x", 400, "Bad Request", {}, io.BytesIO(body)
+        )
+        response = urlopen.return_value.__enter__.return_value
+        response.read.return_value = b"legacy doc content"
+        urlopen.side_effect = [not_found, urlopen.return_value]
+
+        content = core.load_supabase_document_template(
+            "https://project.supabase.co",
+            "sb_secret_example",
+            "document-templates",
+            "fisica",
+        )
+
+        self.assertEqual(content, (b"legacy doc content", "persona-fisica.doc"))
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("Apikey"), "sb_secret_example")
+        self.assertIsNone(request.get_header("Authorization"))
 
     def test_rejects_unknown_customer_type(self):
         with self.assertRaisesRegex(ValueError, "Tipo cliente non valido"):
