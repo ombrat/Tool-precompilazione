@@ -10,6 +10,9 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -923,3 +926,46 @@ def save_template(name, docx_bytes, config):
 def load_template(name):
     d = TEMPLATES_DIR / name
     return (d / "template.docx").read_bytes(), json.loads((d / "config.json").read_text())
+
+
+def load_supabase_document_template(supabase_url, service_role_key, bucket, customer_type):
+    """Load a private Word template from Supabase Storage."""
+    filenames = {
+        "fisica": "persona-fisica.docx",
+        "giuridica": "persona-giuridica.docx",
+    }
+    if customer_type not in filenames:
+        raise ValueError(f"Tipo cliente non valido: {customer_type}")
+    if not supabase_url or not service_role_key:
+        raise ValueError("Configura SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY.")
+    if not bucket:
+        raise ValueError("Configura il nome del bucket Supabase Storage.")
+
+    base_url = supabase_url.rstrip("/")
+    object_path = urllib.parse.quote(f"{bucket}/{filenames[customer_type]}", safe="/")
+    request = urllib.request.Request(
+        f"{base_url}/storage/v1/object/authenticated/{object_path}",
+        headers={
+            "apikey": service_role_key,
+            "Authorization": f"Bearer {service_role_key}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            content = response.read()
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            raise FileNotFoundError(
+                f"Non trovo {filenames[customer_type]} nel bucket privato "
+                f"'{bucket}' di Supabase Storage."
+            ) from error
+        raise RuntimeError(
+            f"Supabase Storage ha restituito HTTP {error.code} "
+            f"per {filenames[customer_type]}."
+        ) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Connessione a Supabase Storage non riuscita: {error.reason}") from error
+
+    if not content:
+        raise ValueError(f"Il modello {filenames[customer_type]} è vuoto.")
+    return content

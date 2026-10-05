@@ -43,6 +43,22 @@ except StreamlitSecretNotFoundError:
     secrets_archive_url = ""
 archive_database_url = os.environ.get("ARCHIVE_DATABASE_URL") or secrets_archive_url
 
+try:
+    secrets_supabase_url = st.secrets.get("SUPABASE_URL", "")
+    secrets_supabase_key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    secrets_templates_bucket = st.secrets.get("SUPABASE_TEMPLATES_BUCKET", "")
+except StreamlitSecretNotFoundError:
+    secrets_supabase_url = secrets_supabase_key = secrets_templates_bucket = ""
+supabase_url = os.environ.get("SUPABASE_URL") or secrets_supabase_url
+supabase_service_role_key = (
+    os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or secrets_supabase_key
+)
+templates_bucket = (
+    os.environ.get("SUPABASE_TEMPLATES_BUCKET")
+    or secrets_templates_bucket
+    or "document-templates"
+)
+
 st.markdown(
     """
     <style>
@@ -110,6 +126,13 @@ def cached_preview(data, fields_json, values_json):
     return core.preview_pages(data, json.loads(fields_json), json.loads(values_json))
 
 
+@st.cache_data(show_spinner=False, max_entries=4, ttl=60)
+def cached_supabase_template(url, service_role_key, bucket, customer_type):
+    return core.load_supabase_document_template(
+        url, service_role_key, bucket, customer_type
+    )
+
+
 def _find_record_index(snapshot, records):
     identity = core.record_identity(snapshot)
     return next(
@@ -159,21 +182,64 @@ profile_by_id = {profile["id"]: profile for profile in archive_profiles}
 tab_main, tab_archive, tab_db = st.tabs(["Documento", "Archivio", "Database"])
 
 with tab_main:
-    up = st.file_uploader("Carica il documento Word (.doc / .docx)", type=["doc", "docx"])
-    if up and st.session_state.get("upkey") != (up.name, up.size):
-        raw = up.getvalue()
-        ext = up.name.rsplit(".", 1)[-1].lower()
-        with st.spinner("Lettura del documento..."):
-            doc = core.convert(raw, "doc", "docx") if ext == "doc" else raw
-            has_role_placeholders = any(
-                core.split_role(key)[1] for key in core.find_placeholders(doc)
+    selected_archive_for_type = profile_by_id.get(
+        st.session_state.get("doc_archive_id")
+    )
+    if selected_archive_for_type:
+        ctype = "giuridica"
+        st.caption("Tipo cliente: Persona giuridica (impostato dalla scheda archiviata)")
+    else:
+        ctype = st.radio(
+            "Tipo di cliente", list(core.CUSTOMER_TYPES),
+            format_func=core.CUSTOMER_TYPES.get, horizontal=True, key="customer_type",
+        )
+
+    with st.expander("Usa un documento locale al posto del modello Supabase"):
+        up = st.file_uploader(
+            "Carica il documento Word (.doc / .docx)", type=["doc", "docx"]
+        )
+
+    template_error = None
+    remote_template = None
+    if not up and supabase_url and supabase_service_role_key:
+        try:
+            remote_template = cached_supabase_template(
+                supabase_url, supabase_service_role_key, templates_bucket, ctype
             )
-            st.session_state.update(
-                doc=doc, fmt=ext, upkey=(up.name, up.size), out=None,
-                customer_type="giuridica" if has_role_placeholders else "fisica",
-            )
+        except Exception as error:
+            template_error = str(error)
+    elif not up:
+        st.info(
+            "Configura SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY per caricare "
+            "automaticamente il modello da Supabase Storage."
+        )
 
     if up:
+        source_name = up.name
+        raw = up.getvalue()
+        ext = up.name.rsplit(".", 1)[-1].lower()
+        source_key = ("upload", up.name, up.size, hashlib.sha256(raw).hexdigest())
+    elif remote_template:
+        source_name = (
+            "persona-fisica.docx" if ctype == "fisica" else "persona-giuridica.docx"
+        )
+        raw = remote_template
+        ext = "docx"
+        source_key = ("supabase", ctype, hashlib.sha256(raw).hexdigest())
+        st.caption(f"Modello caricato da Supabase Storage: {source_name}")
+    else:
+        source_name = raw = ext = source_key = None
+        if template_error:
+            st.error(f"Impossibile caricare il modello da Supabase Storage: {template_error}")
+
+    if source_key:
+        if st.session_state.get("document_source_key") != source_key:
+            with st.spinner("Lettura del documento..."):
+                doc = core.convert(raw, "doc", "docx") if ext == "doc" else raw
+                st.session_state.update(
+                    doc=doc, fmt=ext, document_source_key=source_key, out=None,
+                )
+
         data = st.session_state["doc"]
         fmt = st.session_state["fmt"]
         placeholders = core.find_placeholders(data)
@@ -222,11 +288,6 @@ with tab_main:
                         else:
                             st.rerun()
                 ctype = "giuridica"
-            else:
-                ctype = st.radio(
-                    "Tipo di cliente", list(core.CUSTOMER_TYPES),
-                    format_func=core.CUSTOMER_TYPES.get, horizontal=True, key="customer_type",
-                )
             roles = core.roles_for_customer_type(roles, ctype)
             if selected_archive:
                 rec = selected_archive["payload"]["company"]
@@ -408,7 +469,7 @@ with tab_main:
             if st.session_state.get("out"):
                 st.download_button(
                     "Scarica documento compilato", st.session_state["out"],
-                    file_name=f"{up.name.rsplit('.', 1)[0]}_compilato.{fmt}",
+                    file_name=f"{source_name.rsplit('.', 1)[0]}_compilato.{fmt}",
                     mime="application/msword" if fmt == "doc"
                     else "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )

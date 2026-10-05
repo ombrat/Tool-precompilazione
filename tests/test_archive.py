@@ -1,5 +1,7 @@
 import tempfile
+import urllib.error
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 import core
@@ -107,6 +109,59 @@ class ArchiveProfileTests(unittest.TestCase):
             "postgresql://user.project:password@pooler.example:6543/postgres"
         )
         self.assertEqual(engine.url.drivername, "postgresql+psycopg")
+
+
+class SupabaseDocumentTemplateTests(unittest.TestCase):
+    @patch("core.urllib.request.urlopen")
+    def test_loads_customer_type_template_from_private_storage(self, urlopen):
+        response = urlopen.return_value.__enter__.return_value
+        response.read.return_value = b"docx content"
+
+        content = core.load_supabase_document_template(
+            "https://project.supabase.co/",
+            "service-role-secret",
+            "document-templates",
+            "giuridica",
+        )
+
+        self.assertEqual(content, b"docx content")
+        request = urlopen.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://project.supabase.co/storage/v1/object/authenticated/"
+            "document-templates/persona-giuridica.docx",
+        )
+        self.assertEqual(request.get_header("Apikey"), "service-role-secret")
+        self.assertEqual(
+            request.get_header("Authorization"), "Bearer service-role-secret"
+        )
+
+    @patch("core.urllib.request.urlopen")
+    def test_reports_missing_template(self, urlopen):
+        urlopen.side_effect = urllib.error.HTTPError(
+            "https://project.supabase.co/storage/v1/object/authenticated/"
+            "document-templates/persona-fisica.docx",
+            404,
+            "Not Found",
+            {},
+            None,
+        )
+        with self.assertRaisesRegex(FileNotFoundError, "persona-fisica.docx"):
+            core.load_supabase_document_template(
+                "https://project.supabase.co",
+                "service-role-secret",
+                "document-templates",
+                "fisica",
+            )
+
+    def test_rejects_unknown_customer_type(self):
+        with self.assertRaisesRegex(ValueError, "Tipo cliente non valido"):
+            core.load_supabase_document_template(
+                "https://project.supabase.co",
+                "service-role-secret",
+                "document-templates",
+                "unknown",
+            )
 
 
 if __name__ == "__main__":
