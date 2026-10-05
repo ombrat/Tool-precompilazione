@@ -1,7 +1,9 @@
 import io
+import json
 import tempfile
 import urllib.error
 import unittest
+import unittest.mock
 from unittest.mock import patch
 from pathlib import Path
 
@@ -222,6 +224,38 @@ class SupabaseDocumentTemplateTests(unittest.TestCase):
                 "document-templates",
                 "unknown",
             )
+
+
+class SupabaseAuthTests(unittest.TestCase):
+    @staticmethod
+    def _response(payload):
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(payload).encode()
+        return response
+
+    @patch("core.urllib.request.urlopen")
+    def test_sign_in_then_totp_verification(self, urlopen):
+        urlopen.side_effect = [
+            self._response({"access_token": "aal1", "user": {"email": "a@b.it"}}),
+            self._response({"id": "challenge-1"}),
+            self._response({"access_token": "aal2"}),
+        ]
+        session = core.auth_sign_in("https://p.supabase.co", "sb_publishable_x", "a@b.it", "pw")
+        self.assertEqual(session["access_token"], "aal1")
+        core.auth_verify_totp("https://p.supabase.co", "sb_publishable_x", "aal1", "f1", " 123456 ")
+        verify = urlopen.call_args.args[0]
+        self.assertTrue(verify.full_url.endswith("/auth/v1/factors/f1/verify"))
+        self.assertEqual(json.loads(verify.data), {"challenge_id": "challenge-1", "code": "123456"})
+        self.assertEqual(verify.get_header("Authorization"), "Bearer aal1")
+
+    @patch("core.urllib.request.urlopen")
+    def test_invalid_credentials_message(self, urlopen):
+        urlopen.side_effect = urllib.error.HTTPError(
+            "u", 400, "Bad Request", {},
+            io.BytesIO(b'{"error_description":"Invalid login credentials"}'),
+        )
+        with self.assertRaisesRegex(ValueError, "Invalid login credentials"):
+            core.auth_sign_in("https://p.supabase.co", "sb_publishable_x", "a@b.it", "bad")
 
 
 if __name__ == "__main__":

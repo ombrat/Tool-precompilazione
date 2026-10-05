@@ -978,3 +978,64 @@ def load_supabase_document_template(supabase_url, service_role_key, bucket, cust
         f"Non trovo {', '.join(filenames[customer_type])} nel bucket privato "
         f"'{bucket}' di Supabase Storage."
     )
+
+
+# ---------- autenticazione Supabase Auth con TOTP ----------
+def _auth_request(supabase_url, api_key, path, payload=None, token=None, method=None):
+    headers = {"apikey": api_key, "Content-Type": "application/json"}
+    bearer = token or (api_key if not api_key.startswith("sb_") else "")
+    if bearer:
+        headers["Authorization"] = "Bearer " + bearer
+    request = urllib.request.Request(
+        f"{supabase_url.rstrip('/')}/auth/v1{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers=headers,
+        method=method or ("POST" if payload is not None else "GET"),
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            body = response.read()
+    except urllib.error.HTTPError as error:
+        try:
+            detail = json.loads(error.read().decode("utf-8", "replace"))
+            message = detail.get("msg") or detail.get("error_description") or detail.get("message")
+        except ValueError:
+            message = None
+        raise ValueError(message or f"Supabase Auth ha restituito HTTP {error.code}.") from error
+    except urllib.error.URLError as error:
+        raise RuntimeError(f"Connessione a Supabase Auth non riuscita: {error.reason}") from error
+    return json.loads(body) if body else {}
+
+
+def auth_sign_in(supabase_url, api_key, email, password):
+    """Primo fattore: restituisce la sessione (AAL1) se le credenziali sono valide."""
+    return _auth_request(
+        supabase_url, api_key, "/token?grant_type=password",
+        {"email": email.strip(), "password": password},
+    )
+
+
+def auth_totp_factors(supabase_url, api_key, token):
+    user = _auth_request(supabase_url, api_key, "/user", token=token)
+    return [f for f in user.get("factors") or [] if f.get("factor_type") == "totp"]
+
+
+def auth_enroll_totp(supabase_url, api_key, token):
+    for factor in auth_totp_factors(supabase_url, api_key, token):
+        if factor.get("status") != "verified":
+            _auth_request(supabase_url, api_key, f"/factors/{factor['id']}", token=token, method="DELETE")
+    return _auth_request(
+        supabase_url, api_key, "/factors",
+        {"factor_type": "totp", "friendly_name": f"app-{uuid.uuid4().hex[:8]}"},
+        token=token,
+    )
+
+
+def auth_verify_totp(supabase_url, api_key, token, factor_id, code):
+    """Secondo fattore: restituisce la sessione AAL2 se il codice è valido."""
+    challenge = _auth_request(supabase_url, api_key, f"/factors/{factor_id}/challenge", {}, token=token)
+    return _auth_request(
+        supabase_url, api_key, f"/factors/{factor_id}/verify",
+        {"challenge_id": challenge["id"], "code": code.strip()},
+        token=token,
+    )

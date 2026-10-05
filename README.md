@@ -23,7 +23,8 @@ L'app può essere pubblicata su [Streamlit Community Cloud](https://share.stream
 Prima di avviarla, configura i segreti nelle impostazioni dell'app su Streamlit Community Cloud:
 
 ```toml
-APP_PASSWORD = "scegli-una-password-lunga"
+SUPABASE_PUBLISHABLE_KEY = "sb_publishable_..."
+APP_PASSWORD = "solo-se-non-usi-l-autenticazione-a-due-fattori"
 ARCHIVE_DATABASE_URL = "postgresql://..."
 SUPABASE_URL = "https://<project-ref>.supabase.co"
 SUPABASE_SERVICE_ROLE_KEY = "..."
@@ -31,6 +32,16 @@ SUPABASE_TEMPLATES_BUCKET = "document-templates"
 ```
 
 `ARCHIVE_DATABASE_URL` deve essere la stringa di connessione PostgreSQL del progetto Supabase (per Streamlit usa il transaction pooler indicato in **Connect**). Le tabelle dell'archivio vengono create automaticamente al primo avvio. La stessa password è richiesta a tutti gli utenti; il browser può proporre di salvarla per l'autocompilazione. Non inserire segreti nel repository. In locale, imposta le variabili d'ambiente qui sopra oppure aggiungile a `.streamlit/secrets.toml` (file escluso da Git).
+
+### Autenticazione a due fattori (TOTP)
+
+Se sono configurati `SUPABASE_URL` e `SUPABASE_PUBLISHABLE_KEY` (chiave pubblicabile `sb_publishable_...`, non la secret), l'accesso richiede email e password dell'account personale più un codice TOTP; `APP_PASSWORD` non viene più usata. Per attivarla in Supabase:
+
+1. **Authentication → Sign In / Providers**: lascia attivo il provider Email e **disattiva le registrazioni autonome** (Allow new users to sign up).
+2. **Authentication → Users → Add user**: crea un account per ciascun utente autorizzato (con *Auto Confirm User*).
+3. Al primo accesso l'utente scansiona il QR con Google/Microsoft Authenticator o simili e conferma il codice; dagli accessi successivi basta il codice a 6 cifre. Il TOTP è incluso nel piano gratuito.
+
+Per recuperare l'accesso di un utente che perde il telefono, elimina il suo fattore in **Authentication → Users**: al prossimo accesso potrà registrarne uno nuovo.
 
 `SUPABASE_URL` è l'URL del progetto. `SUPABASE_SERVICE_ROLE_KEY` è la chiave privata di servizio del progetto: configurala solo nei Secrets/variabili d'ambiente, mai nel repository o nel browser. `SUPABASE_TEMPLATES_BUCKET` è facoltativo e, se omesso, usa `document-templates`.
 

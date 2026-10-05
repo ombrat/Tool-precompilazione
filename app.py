@@ -10,27 +10,107 @@ import core
 
 st.set_page_config(page_title="Precompilazione documenti", layout="wide")
 
-try:
-    secrets_password = st.secrets.get("APP_PASSWORD", "")
-except StreamlitSecretNotFoundError:
-    secrets_password = ""
-app_password = os.environ.get("APP_PASSWORD") or secrets_password
-if not isinstance(app_password, str) or not app_password:
+def _setting(name):
+    try:
+        secret = st.secrets.get(name, "")
+    except StreamlitSecretNotFoundError:
+        secret = ""
+    return os.environ.get(name) or secret
+
+
+app_password = _setting("APP_PASSWORD")
+auth_supabase_url = _setting("SUPABASE_URL")
+auth_publishable_key = _setting("SUPABASE_PUBLISHABLE_KEY")
+use_supabase_auth = bool(auth_supabase_url and auth_publishable_key)
+
+if not use_supabase_auth and (not isinstance(app_password, str) or not app_password):
     st.error(
-        "Accesso non configurato. Imposta il segreto APP_PASSWORD prima di avviare l'app."
+        "Accesso non configurato. Imposta SUPABASE_URL e SUPABASE_PUBLISHABLE_KEY "
+        "(autenticazione a due fattori) oppure APP_PASSWORD."
     )
     st.stop()
 
 if not st.session_state.get("authenticated"):
     st.title("Accesso")
-    with st.form("login"):
-        entered_password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Accedi")
-    if submitted:
-        if hmac.compare_digest(entered_password, app_password):
+    if not use_supabase_auth:
+        with st.form("login"):
+            entered_password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Accedi")
+        if submitted:
+            if hmac.compare_digest(entered_password, app_password):
+                st.session_state["authenticated"] = True
+                st.rerun()
+            st.error("Password non valida.")
+        st.stop()
+
+    pending = st.session_state.get("auth_pending")
+    if not pending:
+        with st.form("login"):
+            email = st.text_input("Email")
+            entered_password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Accedi")
+        if submitted:
+            try:
+                session = core.auth_sign_in(
+                    auth_supabase_url, auth_publishable_key, email, entered_password
+                )
+                token = session["access_token"]
+                factors = core.auth_totp_factors(
+                    auth_supabase_url, auth_publishable_key, token
+                )
+                verified = next((f for f in factors if f.get("status") == "verified"), None)
+                st.session_state["auth_pending"] = {
+                    "token": token,
+                    "email": session.get("user", {}).get("email", email),
+                    "factor_id": verified["id"] if verified else None,
+                }
+                st.session_state.pop("auth_enroll", None)
+                st.rerun()
+            except (ValueError, RuntimeError) as error:
+                st.error(str(error))
+        st.stop()
+
+    st.caption(f"Account: {pending['email']}")
+    if pending["factor_id"] is None:
+        st.info(
+            "Primo accesso: scansiona il codice QR con un'app di autenticazione "
+            "(Google Authenticator, Microsoft Authenticator, Authy...) e inserisci il codice generato."
+        )
+        if "auth_enroll" not in st.session_state:
+            try:
+                st.session_state["auth_enroll"] = core.auth_enroll_totp(
+                    auth_supabase_url, auth_publishable_key, pending["token"]
+                )
+            except (ValueError, RuntimeError) as error:
+                st.error(str(error))
+                st.stop()
+        enroll = st.session_state["auth_enroll"]
+        qr_code = enroll["totp"]["qr_code"]
+        if qr_code.startswith("data:image/svg+xml"):
+            st.image(qr_code.split(",", 1)[1])
+        st.code(enroll["totp"]["secret"], language=None)
+        factor_id = enroll["id"]
+    else:
+        factor_id = pending["factor_id"]
+    with st.form("totp"):
+        code = st.text_input("Codice a 6 cifre", max_chars=6)
+        confirmed = st.form_submit_button("Conferma")
+    if confirmed:
+        try:
+            core.auth_verify_totp(
+                auth_supabase_url, auth_publishable_key, pending["token"], factor_id, code
+            )
+        except (ValueError, RuntimeError) as error:
+            st.error(str(error))
+        else:
+            st.session_state.pop("auth_pending", None)
+            st.session_state.pop("auth_enroll", None)
             st.session_state["authenticated"] = True
             st.rerun()
-        st.error("Password non valida.")
+    if st.button("Annulla"):
+        st.session_state.pop("auth_pending", None)
+        st.session_state.pop("auth_enroll", None)
+        st.rerun()
     st.stop()
 
 if st.sidebar.button("Esci"):
