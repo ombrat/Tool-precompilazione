@@ -1,0 +1,17 @@
+{
+  "xls_path": "/workspaces/Tool-precompilazione/data/database.XLS",
+  "db_url": "sqlite:////workspaces/Tool-precompilazione/anagrafica.db",
+  "tables": {
+    "fisica": "persone_fisiche",
+    "giuridica": "persone_giuridiche"
+  },
+  "label_columns": {
+    "fisica": [
+      "cognome",
+      "nome"
+    ],
+    "giuridica": [
+      "cognome"
+    ]
+  }
+}

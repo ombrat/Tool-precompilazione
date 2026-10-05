@@ -6,6 +6,14 @@ import core
 
 st.set_page_config(page_title="Precompilazione documenti", layout="wide")
 
+_REFRESH_FIELD_WIDGETS = {
+    "DATA_EMISSIONE", "DATA_DI_RILASCIO", "DOCUMENTO_DI_IDENTITA", "NUMERO_DOCUMENTO",
+}
+
+
+def _field_widget_revision(name):
+    return "_v2" if core._norm(name).upper() in _REFRESH_FIELD_WIDGETS else ""
+
 
 @st.cache_data(show_spinner=False, max_entries=20)
 def cached_preview(data, fields_json, values_json):
@@ -64,9 +72,10 @@ with tab_main:
                 for key in main_keys:
                     opts = ["(nessuna)"] + cols
                     g = core.guess_column(key, cols, ctype)
+                    key_revision = _field_widget_revision(key)
                     sel = st.selectbox(
                         key.replace("_", " "), opts, index=opts.index(g) if g else 0,
-                        key=f"map_{ctype}_{key}",
+                        key=f"map_{ctype}_{key}{key_revision}",
                     )
                     mapping[key] = None if sel == "(nessuna)" else sel
 
@@ -75,10 +84,10 @@ with tab_main:
             for key in main_keys:
                 label = key.replace("_", " ").capitalize()
                 col = mapping.get(key)
-                init = "" if not col or rec.get(col) is None else str(rec[col])
-                k = f"v_{rid}_{key}"
+                init = core.format_field_value(key, rec.get(col) if col else None)
+                k = f"v_{rid}_{key}{_field_widget_revision(key)}"
                 if key in core.PREDEFINED:
-                    values[key] = st.text_input(label, value=init, key=k)
+                    values[key] = core.format_field_value(key, st.text_input(label, value=init, key=k))
                 else:
                     values[key] = st.text_area(label, value=init, height=130, key=k)
 
@@ -102,13 +111,14 @@ with tab_main:
                     for key in keys:
                         base = core.split_role(key)[0]
                         label = base.replace("_", " ").capitalize()
+                        key_revision = _field_widget_revision(base)
                         if base == "CARICA":
-                            init, k = carica or "", f"v_{key}_{carica}"
+                            init, k = carica or "", f"v_{key}_{carica}{key_revision}"
                         else:
                             col = core.guess_column(base, pcols, "fisica")
-                            init = "" if not col or person.get(col) is None else str(person[col])
-                            k = f"v_{key}_{person.get('id', '')}"
-                        values[key] = st.text_input(label, value=init, key=k)
+                            init = core.format_field_value(base, person.get(col) if col else None)
+                            k = f"v_{key}_{person.get('id', '')}{key_revision}"
+                        values[key] = core.format_field_value(base, st.text_input(label, value=init, key=k))
             if not placeholders:
                 st.warning("Nessun segnaposto trovato (es. [NOME], [COGNOME]).")
 

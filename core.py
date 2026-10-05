@@ -327,6 +327,15 @@ PREDEFINED = {
     "COGNOME": ["cognome"],
     "DATA_DI_NASCITA": ["data_nascita", "data_di_nascita"],
     "LUOGO_DI_NASCITA": ["localita_nascita", "luogo_nascita", "luogo_di_nascita"],
+    "DATA_SCADENZA": ["data_scadenza"],
+    "DATA_DI_RILASCIO": ["data_emissione", "data_rilascio"],
+    "DATA_EMISSIONE": ["data_di_rilascio", "data_rilascio"],
+    "TIPO_DOCUMENTO": ["tipo_documento_di_identita"],
+    "TIPO_DOCUMENTO_DI_IDENTITA": ["tipo_documento"],
+    "ENTE_EMITTENTE": ["comune_di"],
+    "COMUNE_DI": ["ente_emittente"],
+    "DOCUMENTO_DI_IDENTITA": ["numero_documento", "documento_di_identita"],
+    "NUMERO_DOCUMENTO": ["documento_di_identita"],
     "RESIDENZA": ["residenza", "indirizzo"],
     "RAGIONE_SOCIALE": ["ragione_sociale"],
     "SEDE_LEGALE": ["sede_legale"],
@@ -335,21 +344,42 @@ PREDEFINED = {
     "RUOLO_SOCIETARIO": ["ruolo_societario", "ruolo"],
 }
 
+
+def format_field_value(name, value):
+    if value is None:
+        return ""
+    value = str(value).strip()
+    normalized_name = _norm(name).upper()
+    if normalized_name in {"TIPO_DOCUMENTO", "TIPO_DOCUMENTO_DI_IDENTITA"}:
+        code = re.sub(r"\.0+$", "", value)
+        return {
+            "1": "CARTA D'IDENTITA'",
+            "01": "CARTA D'IDENTITA'",
+            "3": "PASSAPORTO",
+            "03": "PASSAPORTO",
+        }.get(code, value)
+    return value
+
+
 # Campi che non hanno senso per un tipo di cliente
 ONLY_FISICA = {"NOME", "COGNOME", "DATA_DI_NASCITA", "LUOGO_DI_NASCITA", "RESIDENZA"}
 ONLY_GIURIDICA = {"RAGIONE_SOCIALE", "SEDE_LEGALE"}
 
 
 def guess_column(name, columns, ctype=None):
-    if (ctype == "giuridica" and name in ONLY_FISICA) or (ctype == "fisica" and name in ONLY_GIURIDICA):
+    normalized_name = _norm(name).upper()
+    if (ctype == "giuridica" and normalized_name in ONLY_FISICA) or (
+        ctype == "fisica" and normalized_name in ONLY_GIURIDICA
+    ):
         return None
-    cands = [name.lower()] + PREDEFINED.get(name, [])
-    if ctype == "giuridica" and name == "RAGIONE_SOCIALE":
+    cands = PREDEFINED.get(normalized_name, []) + [normalized_name.lower()]
+    if ctype == "giuridica" and normalized_name == "RAGIONE_SOCIALE":
         cands.append("cognome")
     lowered = {_norm(c): c for c in columns}
     for cand in cands:
-        if cand in lowered:
-            return lowered[cand]
+        if normalized := _norm(cand):
+            if normalized in lowered:
+                return lowered[normalized]
     return None
 
 
