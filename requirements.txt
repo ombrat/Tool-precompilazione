@@ -1,6 +1,7 @@
 streamlit
 python-docx
 sqlalchemy
+psycopg[binary]
 pymupdf
 xlrd
 pywin32; sys_platform == "win32"

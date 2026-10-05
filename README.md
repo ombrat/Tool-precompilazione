@@ -20,15 +20,18 @@ Su Windows, l'anteprima e le conversioni `.doc`/`.docx`/PDF vengono eseguite da 
 
 L'app può essere pubblicata su [Streamlit Community Cloud](https://share.streamlit.io/) collegando il repository GitHub e scegliendo `app.py` come file principale. Le dipendenze di sistema per LibreOffice sono elencate in `packages.txt`.
 
-Prima di avviarla, configura il segreto `APP_PASSWORD` nelle impostazioni dell'app su Streamlit Community Cloud:
+Prima di avviarla, configura i segreti nelle impostazioni dell'app su Streamlit Community Cloud:
 
 ```toml
 APP_PASSWORD = "scegli-una-password-lunga"
+ARCHIVE_DATABASE_URL = "postgresql://..."
 ```
 
-La stessa password è richiesta a tutti gli utenti; il browser può proporre di salvarla per l'autocompilazione. Non inserire il segreto nel repository. Per l'avvio locale, imposta la variabile d'ambiente `APP_PASSWORD` oppure aggiungi il segreto a `.streamlit/secrets.toml` (file escluso da Git).
+`ARCHIVE_DATABASE_URL` deve essere la stringa di connessione PostgreSQL del progetto Supabase (per Streamlit usa il transaction pooler indicato in **Connect**). La tabella dell'archivio viene creata automaticamente al primo avvio. La stessa password è richiesta a tutti gli utenti; il browser può proporre di salvarla per l'autocompilazione. Non inserire segreti nel repository. In locale, imposta le variabili d'ambiente `APP_PASSWORD` e `ARCHIVE_DATABASE_URL`, oppure aggiungile a `.streamlit/secrets.toml` (file escluso da Git).
 
 Ogni utente deve caricare il proprio database Excel nella scheda **Database**. Il file viene letto in memoria nella sessione dell'utente, non salvato nella cartella condivisa del server, e va caricato di nuovo quando si apre una nuova sessione. Anche i file Word caricati e generati non sono archiviati come archivio permanente. Evita comunque di includere dati personali reali, documenti o credenziali nel repository: un link protetto da password non sostituisce le misure di sicurezza e gli obblighi privacy applicabili.
+
+La scheda **Archivio** salva su Supabase una copia della persona giuridica, del legale rappresentante e di uno o più titolari effettivi con le rispettive percentuali. I dati archiviati sono condivisi tra tutti gli utenti che conoscono la password; seleziona la scheda dalla pagina **Documento** per riutilizzarla anche senza ricaricare l'Excel. Usa solo dati che sei autorizzato a conservare e limita l'accesso alla password.
 
 ## Uso
 1. **Configura documento**: carica il .docx (segnaposto `{{campo}}` oppure testo esistente da sostituire); per ogni campo scegli l'origine: colonna del database (per persona fisica/giuridica), testo manuale breve/lungo (premessa, condizioni economiche...) o valore fisso. Salva il modello.

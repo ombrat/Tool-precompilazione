@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unicodedata
+import uuid
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -17,13 +18,37 @@ from docx.enum.text import WD_COLOR_INDEX
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.text.run import Run
-from sqlalchemy import create_engine, text
+from sqlalchemy import (
+    JSON,
+    Column,
+    DateTime,
+    MetaData,
+    String,
+    Table,
+    Text,
+    create_engine,
+    func,
+    insert,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.pool import NullPool
 
 BASE = Path(__file__).parent
 TEMPLATES_DIR = BASE / "templates"
 SETTINGS_FILE = BASE / "settings.json"
 PLACEHOLDER_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}|\[([A-ZÀ-Ý][A-ZÀ-Ý0-9 _']*)\]")
 CUSTOMER_TYPES = {"fisica": "Persona fisica", "giuridica": "Persona giuridica"}
+ARCHIVE_METADATA = MetaData()
+ARCHIVE_PROFILES = Table(
+    "archive_corporate_profiles",
+    ARCHIVE_METADATA,
+    Column("id", String(36), primary_key=True),
+    Column("name", Text, nullable=False),
+    Column("payload", JSON, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
 
 DEFAULT_SETTINGS = {
     "xls_path": str(BASE / "Database.XLS"),
@@ -134,6 +159,117 @@ def record_label(ctype, rec):
     by_norm = {_norm(k): v for k, v in rec.items()}
     cols = load_settings()["label_columns"][ctype]
     return " ".join(str(by_norm.get(_norm(c), "")) for c in cols).strip() or str(rec)
+
+
+def record_identity(record):
+    for key, value in record.items():
+        if _norm(key) in {"codice_fiscale", "cf"} and str(value or "").strip():
+            return f"cf:{str(value).strip().upper()}"
+    if record.get("id") not in (None, ""):
+        return f"id:{record['id']}"
+    return f"name:{_norm(record_label('fisica', record))}"
+
+
+@functools.lru_cache(maxsize=2)
+def _archive_engine(database_url):
+    if database_url.startswith("postgres://"):
+        database_url = "postgresql+psycopg://" + database_url[len("postgres://"):]
+    elif database_url.startswith("postgresql://"):
+        database_url = "postgresql+psycopg://" + database_url[len("postgresql://"):]
+    return create_engine(database_url, poolclass=NullPool, pool_pre_ping=True)
+
+
+def _archive_table(database_url):
+    if not database_url:
+        raise ValueError("Configura ARCHIVE_DATABASE_URL per usare l'archivio persistente.")
+    engine = _archive_engine(database_url)
+    ARCHIVE_METADATA.create_all(engine)
+    return engine
+
+
+def list_archive_profiles(database_url):
+    engine = _archive_table(database_url)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(
+                ARCHIVE_PROFILES.c.id,
+                ARCHIVE_PROFILES.c.name,
+                ARCHIVE_PROFILES.c.payload,
+                ARCHIVE_PROFILES.c.updated_at,
+            ).order_by(ARCHIVE_PROFILES.c.name)
+        )
+        return [
+            {
+                "id": row.id,
+                "name": row.name,
+                "payload": row.payload,
+                "updated_at": row.updated_at,
+            }
+            for row in rows
+        ]
+
+
+def save_archive_profile(database_url, name, payload, profile_id=None):
+    name = str(name).strip()
+    if not name:
+        raise ValueError("Inserisci un nome per la scheda.")
+    payload = copy.deepcopy(payload)
+    company = payload.get("company")
+    representative = payload.get("legal_representative")
+    owners = payload.get("owners")
+    if not isinstance(company, dict) or not company or not isinstance(representative, dict) or not representative:
+        raise ValueError("La scheda deve contenere società e legale rappresentante.")
+    if not isinstance(owners, list) or not owners:
+        raise ValueError("Aggiungi almeno un titolare effettivo.")
+    identities = set()
+    for owner in owners:
+        if not isinstance(owner, dict):
+            raise ValueError("I dati del titolare effettivo non sono validi.")
+        person = owner.get("person")
+        if not isinstance(person, dict) or not person:
+            raise ValueError("Seleziona ogni titolare effettivo.")
+        identity = record_identity(person)
+        if identity in identities:
+            raise ValueError("Lo stesso titolare effettivo è stato selezionato più di una volta.")
+        identities.add(identity)
+        try:
+            percentage = Decimal(str(owner.get("percentage", "")))
+        except InvalidOperation as error:
+            raise ValueError(
+                "Inserisci una percentuale valida per ogni titolare effettivo."
+            ) from error
+        if not percentage.is_finite() or not Decimal("0") <= percentage <= Decimal("100"):
+            raise ValueError("Le percentuali devono essere comprese tra 0 e 100.")
+        owner["percentage"] = format(percentage, "f")
+
+    engine = _archive_table(database_url)
+    with engine.begin() as connection:
+        if profile_id:
+            result = connection.execute(
+                update(ARCHIVE_PROFILES)
+                .where(ARCHIVE_PROFILES.c.id == profile_id)
+                .values(name=name, payload=payload, updated_at=func.now())
+            )
+            if result.rowcount != 1:
+                raise KeyError("La scheda da aggiornare non esiste più.")
+            return profile_id
+        profile_id = str(uuid.uuid4())
+        connection.execute(
+            insert(ARCHIVE_PROFILES).values(
+                id=profile_id, name=name, payload=payload, updated_at=func.now()
+            )
+        )
+    return profile_id
+
+
+def delete_archive_profile(database_url, profile_id):
+    engine = _archive_table(database_url)
+    with engine.begin() as connection:
+        result = connection.execute(
+            ARCHIVE_PROFILES.delete().where(ARCHIVE_PROFILES.c.id == profile_id)
+        )
+    if result.rowcount != 1:
+        raise KeyError("La scheda da eliminare non esiste più.")
 
 
 # ---------- conversione .doc <-> .docx ----------

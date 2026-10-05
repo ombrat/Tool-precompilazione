@@ -37,6 +37,12 @@ if st.sidebar.button("Esci"):
     st.session_state.clear()
     st.rerun()
 
+try:
+    secrets_archive_url = st.secrets.get("ARCHIVE_DATABASE_URL", "")
+except StreamlitSecretNotFoundError:
+    secrets_archive_url = ""
+archive_database_url = os.environ.get("ARCHIVE_DATABASE_URL") or secrets_archive_url
+
 st.markdown(
     """
     <style>
@@ -104,7 +110,24 @@ def cached_preview(data, fields_json, values_json):
     return core.preview_pages(data, json.loads(fields_json), json.loads(values_json))
 
 
-tab_main, tab_db = st.tabs(["Documento", "Database"])
+def _find_record_index(snapshot, records):
+    identity = core.record_identity(snapshot)
+    return next(
+        (index for index, record in enumerate(records)
+         if core.record_identity(record) == identity),
+        None,
+    )
+
+
+archive_profiles, archive_error = [], None
+if archive_database_url:
+    try:
+        archive_profiles = core.list_archive_profiles(archive_database_url)
+    except Exception as error:
+        archive_error = str(error)
+
+profile_by_id = {profile["id"]: profile for profile in archive_profiles}
+tab_main, tab_archive, tab_db = st.tabs(["Documento", "Archivio", "Database"])
 
 with tab_main:
     up = st.file_uploader("Carica il documento Word (.doc / .docx)", type=["doc", "docx"])
@@ -136,26 +159,53 @@ with tab_main:
 
         with left:
             st.subheader("Dati")
-            ctype = st.radio(
-                "Tipo di cliente", list(core.CUSTOMER_TYPES),
-                format_func=core.CUSTOMER_TYPES.get, horizontal=True, key="customer_type",
-            )
-            roles = core.roles_for_customer_type(roles, ctype)
-            try:
-                xls_content = st.session_state.get("uploaded_xls")
-                records = core.db_records(ctype, xls_content)
-                cols = core.db_columns(ctype, xls_content)
-            except Exception as e:
-                records, cols = [], []
-                st.error(f"Errore database: {e}")
-            rec, rid = {}, "none"
-            if records:
-                idx = st.selectbox(
-                    "Anagrafica", range(len(records)),
-                    format_func=lambda i: core.record_label(ctype, records[i]),
+            if st.session_state.get("doc_archive_id") not in (
+                [None] + list(profile_by_id)
+            ):
+                st.session_state["doc_archive_id"] = None
+            if archive_database_url and not archive_error:
+                selected_archive_id = st.selectbox(
+                    "Scheda archiviata (opzionale)",
+                    [None] + list(profile_by_id),
+                    format_func=lambda value: (
+                        "Seleziona una scheda" if value is None
+                        else profile_by_id[value]["name"]
+                    ),
+                    key="doc_archive_id",
                 )
-                rec = records[idx]
-                rid = f"{ctype}_{rec.get('id', idx)}"
+            else:
+                selected_archive_id = None
+            selected_archive = profile_by_id.get(selected_archive_id)
+            if selected_archive:
+                st.info(f"Scheda archiviata caricata: {selected_archive['name']}")
+                ctype = "giuridica"
+            else:
+                ctype = st.radio(
+                    "Tipo di cliente", list(core.CUSTOMER_TYPES),
+                    format_func=core.CUSTOMER_TYPES.get, horizontal=True, key="customer_type",
+                )
+            roles = core.roles_for_customer_type(roles, ctype)
+            if selected_archive:
+                rec = selected_archive["payload"]["company"]
+                cols = list(rec)
+                rid = f"archive_{selected_archive['id']}"
+            else:
+                try:
+                    xls_content = st.session_state.get("uploaded_xls")
+                    records = core.db_records(ctype, xls_content)
+                    cols = core.db_columns(ctype, xls_content)
+                except Exception as e:
+                    records, cols = [], []
+                    st.error(f"Errore database: {e}")
+                rec, rid = {}, "none"
+                if records:
+                    idx = st.selectbox(
+                        "Anagrafica", range(len(records)),
+                        format_func=lambda i: core.record_label(ctype, records[i]),
+                        key="company_record",
+                    )
+                    rec = records[idx]
+                    rid = f"{ctype}_{rec.get('id', idx)}"
 
             mapping = {}
             with st.expander("Collegamento campi / colonne database"):
@@ -173,7 +223,7 @@ with tab_main:
                     mapping[key] = None if sel == "(nessuna)" else sel
 
             values = {}
-            if roles:
+            if roles and not selected_archive:
                 try:
                     xls_content = st.session_state.get("uploaded_xls")
                     people = core.db_records("fisica", xls_content)
@@ -184,14 +234,33 @@ with tab_main:
             for role, keys in roles.items():
                 with st.container(border=True):
                     st.markdown(f"**{core.role_label(role)}**")
-                    pidx = st.selectbox(
-                        "Anagrafica", range(len(people)), index=None, placeholder="Cerca per cognome...",
-                        format_func=lambda i: core.record_label("fisica", people[i]), key=f"pers_{role}",
-                    )
-                    person = people[pidx] if pidx is not None else {}
-                    carica = st.selectbox("Carica", core.CARICHE, index=None, placeholder="Seleziona la carica", key=f"car_{role}")
-                    if carica == "Altro":
-                        carica = st.text_input("Specifica la carica", key=f"caro_{role}")
+                    archived_owner = None
+                    if selected_archive:
+                        payload = selected_archive["payload"]
+                        if role == "LR":
+                            person = payload["legal_representative"]
+                            carica = payload.get("representative_role", "")
+                        elif role.startswith("TE"):
+                            owner_index = int(role[2:]) - 1 if role[2:].isdigit() else 0
+                            owners = payload.get("owners", [])
+                            archived_owner = owners[owner_index] if owner_index < len(owners) else None
+                            person = archived_owner["person"] if archived_owner else {}
+                            carica = ""
+                        else:
+                            person, carica = {}, ""
+                        st.caption(core.record_label("fisica", person) if person else "Nominativo non presente nella scheda.")
+                    else:
+                        pidx = st.selectbox(
+                            "Anagrafica", range(len(people)), index=None, placeholder="Cerca per cognome...",
+                            format_func=lambda i: core.record_label("fisica", people[i]), key=f"pers_{role}",
+                        )
+                        person = people[pidx] if pidx is not None else {}
+                        carica = st.selectbox(
+                            "Carica", core.CARICHE, index=None, placeholder="Seleziona la carica",
+                            key=f"car_{role}",
+                        )
+                        if carica == "Altro":
+                            carica = st.text_input("Specifica la carica", key=f"caro_{role}")
 
                     def render_role_field(key):
                         base = core.split_role(key)[0]
@@ -199,10 +268,14 @@ with tab_main:
                         key_revision = _field_widget_revision(base)
                         if base in {"CARICA", "RUOLO"}:
                             init, k = carica or "", f"v_{key}_{carica}{key_revision}"
+                        elif archived_owner and "PERCENT" in core._norm(base).upper():
+                            init = archived_owner["percentage"]
+                            k = f"v_{rid}_{key}_{role}{key_revision}"
                         else:
-                            col = core.guess_column(base, pcols, "fisica")
+                            person_columns = person.keys() if selected_archive else pcols
+                            col = core.guess_column(base, person_columns, "fisica")
                             init = core.format_field_value(base, person.get(col) if col else None)
-                            k = f"v_{key}_{person.get('id', '')}{key_revision}"
+                            k = f"v_{rid}_{key}_{person.get('id', '')}{key_revision}"
                         values[key] = core.format_field_value(
                             base, _render_field_widget(base, label, init, k)
                         )
@@ -258,6 +331,196 @@ with tab_main:
                 with st.spinner("Aggiornamento anteprima..."):
                     for img in cached_preview(data, json.dumps(fields), json.dumps(values)):
                         st.image(img, width="stretch")
+
+with tab_archive:
+    st.subheader("Archivio condiviso delle persone giuridiche")
+    if not archive_database_url:
+        st.error(
+            "Archivio non configurato. Aggiungi ARCHIVE_DATABASE_URL ai Secrets "
+            "dell'app Streamlit."
+        )
+    elif archive_error:
+        st.error(f"Impossibile collegarsi al database dell'archivio: {archive_error}")
+    else:
+        if notice := st.session_state.pop("archive_notice", None):
+            st.success(notice)
+
+        saved_profile_ids = [profile["id"] for profile in archive_profiles]
+        if st.session_state.get("archive_edit_id") not in [None] + saved_profile_ids:
+            st.session_state["archive_edit_id"] = None
+        selected_id = st.selectbox(
+            "Scheda da modificare o consultare",
+            [None] + saved_profile_ids,
+            format_func=lambda value: (
+                "Nuova scheda" if value is None else profile_by_id[value]["name"]
+            ),
+            key="archive_edit_id",
+        )
+        saved_profile = profile_by_id.get(selected_id)
+        editor_key = selected_id or "new"
+
+        if (
+            "archive_owner_count" not in st.session_state
+            or st.session_state.get("archive_editor_loaded") != selected_id
+        ):
+            st.session_state["archive_owner_count"] = max(
+                1, len(saved_profile["payload"].get("owners", [])) if saved_profile else 1
+            )
+            st.session_state["archive_editor_loaded"] = selected_id
+            st.rerun()
+
+        xls_content = st.session_state.get("uploaded_xls")
+        if xls_content is None:
+            st.warning(
+                "Per creare o modificare una scheda, carica prima il file Excel "
+                "nella scheda Database. Le schede già salvate restano disponibili."
+            )
+            if saved_profile:
+                payload = saved_profile["payload"]
+                st.write(f"**Società:** {core.record_label('giuridica', payload['company'])}")
+                st.write(
+                    "**Legale rappresentante:** "
+                    f"{core.record_label('fisica', payload['legal_representative'])}"
+                )
+                for index, owner in enumerate(payload["owners"], start=1):
+                    st.write(
+                        f"**Titolare effettivo {index}:** "
+                        f"{core.record_label('fisica', owner['person'])} — "
+                        f"{owner['percentage']}%"
+                    )
+                if st.button("Elimina scheda", type="secondary"):
+                    try:
+                        core.delete_archive_profile(archive_database_url, selected_id)
+                    except Exception as error:
+                        st.error(f"Impossibile eliminare la scheda: {error}")
+                    else:
+                        st.session_state["archive_notice"] = "Scheda eliminata."
+                        st.rerun()
+        else:
+            companies = xls_content[1]["giuridica"]
+            people = xls_content[1]["fisica"]
+            if not companies:
+                st.warning("Il file Excel caricato non contiene persone giuridiche.")
+            elif not people:
+                st.warning("Il file Excel caricato non contiene persone fisiche.")
+            else:
+                saved_payload = saved_profile["payload"] if saved_profile else {}
+                saved_company = saved_payload.get("company", {})
+                company_index = _find_record_index(saved_company, companies)
+                company_idx = st.selectbox(
+                    "Persona giuridica",
+                    range(len(companies)),
+                    index=company_index,
+                    format_func=lambda index: core.record_label("giuridica", companies[index]),
+                    key=f"archive_company_{editor_key}",
+                )
+                company = companies[company_idx] if company_idx is not None else {}
+
+                saved_representative = saved_payload.get("legal_representative", {})
+                representative_index = _find_record_index(saved_representative, people)
+                representative_idx = st.selectbox(
+                    "Legale rappresentante",
+                    range(len(people)),
+                    index=representative_index,
+                    format_func=lambda index: core.record_label("fisica", people[index]),
+                    key=f"archive_representative_{editor_key}",
+                )
+                representative = (
+                    people[representative_idx] if representative_idx is not None else {}
+                )
+                representative_role = st.text_input(
+                    "Carica del legale rappresentante",
+                    value=saved_payload.get("representative_role", ""),
+                    key=f"archive_role_{editor_key}",
+                )
+
+                owner_count_key = "archive_owner_count"
+                owner_count = st.session_state[owner_count_key]
+                add_col, remove_col = st.columns(2)
+                if add_col.button("Aggiungi titolare effettivo", key=f"add_owner_{editor_key}"):
+                    st.session_state[owner_count_key] = owner_count + 1
+                    st.rerun()
+                if owner_count > 1 and remove_col.button(
+                    "Rimuovi ultimo titolare", key=f"remove_owner_{editor_key}"
+                ):
+                    st.session_state[owner_count_key] = owner_count - 1
+                    st.rerun()
+
+                saved_owners = saved_payload.get("owners", [])
+                owners = []
+                for index in range(owner_count):
+                    existing_owner = saved_owners[index] if index < len(saved_owners) else {}
+                    owner_cols = st.columns([3, 1])
+                    person_index = _find_record_index(existing_owner.get("person", {}), people)
+                    person_index = st.selectbox(
+                        f"Titolare effettivo {index + 1}",
+                        range(len(people)),
+                        index=person_index,
+                        format_func=lambda person_idx: core.record_label(
+                            "fisica", people[person_idx]
+                        ),
+                        key=f"archive_owner_{editor_key}_{index}",
+                    )
+                    percentage = owner_cols[1].number_input(
+                        "Quota %",
+                        min_value=0.0,
+                        max_value=100.0,
+                        step=0.01,
+                        format="%.2f",
+                        value=float(existing_owner.get("percentage", 0) or 0),
+                        key=f"archive_percentage_{editor_key}_{index}",
+                    )
+                    owners.append(
+                        {
+                            "person": people[person_index] if person_index is not None else {},
+                            "percentage": str(percentage),
+                        }
+                    )
+
+                profile_name = st.text_input(
+                    "Nome della scheda",
+                    value=saved_profile["name"] if saved_profile else "",
+                    key=f"archive_name_{editor_key}",
+                    placeholder=(
+                        core.record_label("giuridica", company) if company else ""
+                    ),
+                )
+                save_col, delete_col = st.columns(2)
+                can_save = bool(company and representative) and all(
+                    owner["person"] for owner in owners
+                )
+                if save_col.button("Salva scheda", type="primary", disabled=not can_save):
+                    payload = {
+                        "company": company,
+                        "legal_representative": representative,
+                        "representative_role": representative_role.strip(),
+                        "owners": owners,
+                    }
+                    try:
+                        core.save_archive_profile(
+                            archive_database_url,
+                            profile_name or core.record_label("giuridica", company),
+                            payload,
+                            profile_id=selected_id,
+                        )
+                    except (KeyError, ValueError) as error:
+                        st.error(str(error))
+                    except Exception as error:
+                        st.error(f"Impossibile salvare la scheda: {error}")
+                    else:
+                        st.session_state["archive_notice"] = "Scheda salvata nell'archivio."
+                        st.rerun()
+
+                if saved_profile and delete_col.button(
+                    "Elimina scheda", type="secondary"
+                ):
+                    try:
+                        core.delete_archive_profile(archive_database_url, selected_id)
+                    except Exception as error:
+                        st.error(f"Impossibile eliminare la scheda: {error}")
+                    else:
+                        st.session_state["archive_notice"] = "Scheda eliminata."
+                        st.rerun()
 
 with tab_db:
     s = core.load_settings()
