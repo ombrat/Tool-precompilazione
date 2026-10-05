@@ -1,5 +1,6 @@
 import copy
 import functools
+import hashlib
 import html as _html
 import io
 import json
@@ -20,6 +21,7 @@ from docx.oxml.ns import qn
 from docx.text.run import Run
 from sqlalchemy import (
     JSON,
+    LargeBinary,
     Column,
     DateTime,
     MetaData,
@@ -47,6 +49,15 @@ ARCHIVE_PROFILES = Table(
     Column("id", String(36), primary_key=True),
     Column("name", Text, nullable=False),
     Column("payload", JSON, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+ARCHIVE_DEFAULT_DATABASE = Table(
+    "archive_default_database",
+    ARCHIVE_METADATA,
+    Column("id", String(36), primary_key=True),
+    Column("filename", Text, nullable=False),
+    Column("sha256", String(64), nullable=False),
+    Column("content", LargeBinary, nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 
@@ -223,6 +234,65 @@ def _archive_table(database_url):
     engine = _archive_engine(database_url)
     ARCHIVE_METADATA.create_all(engine)
     return engine
+
+
+def get_default_database_info(database_url):
+    engine = _archive_table(database_url)
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(
+                ARCHIVE_DEFAULT_DATABASE.c.filename,
+                ARCHIVE_DEFAULT_DATABASE.c.sha256,
+                ARCHIVE_DEFAULT_DATABASE.c.updated_at,
+            ).where(ARCHIVE_DEFAULT_DATABASE.c.id == "default")
+        ).one_or_none()
+    if row is None:
+        return None
+    return {
+        "filename": row.filename,
+        "sha256": row.sha256,
+        "updated_at": row.updated_at,
+    }
+
+
+def get_default_database_content(database_url):
+    engine = _archive_table(database_url)
+    with engine.connect() as connection:
+        return connection.execute(
+            select(ARCHIVE_DEFAULT_DATABASE.c.content).where(
+                ARCHIVE_DEFAULT_DATABASE.c.id == "default"
+            )
+        ).scalar_one_or_none()
+
+
+def save_default_database(database_url, filename, content):
+    filename = str(filename).strip()
+    if not filename or not isinstance(content, bytes) or not content:
+        raise ValueError("Seleziona un file Excel valido.")
+    digest = hashlib.sha256(content).hexdigest()
+    engine = _archive_table(database_url)
+    with engine.begin() as connection:
+        result = connection.execute(
+            update(ARCHIVE_DEFAULT_DATABASE)
+            .where(ARCHIVE_DEFAULT_DATABASE.c.id == "default")
+            .values(
+                filename=filename,
+                sha256=digest,
+                content=content,
+                updated_at=func.now(),
+            )
+        )
+        if result.rowcount == 0:
+            connection.execute(
+                insert(ARCHIVE_DEFAULT_DATABASE).values(
+                    id="default",
+                    filename=filename,
+                    sha256=digest,
+                    content=content,
+                    updated_at=func.now(),
+                )
+            )
+    return digest
 
 
 def list_archive_profiles(database_url):

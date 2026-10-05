@@ -55,6 +55,34 @@ class ArchiveProfileTests(unittest.TestCase):
         core.delete_archive_profile(self.database_url, profile_id)
         self.assertEqual(core.list_archive_profiles(self.database_url), [])
 
+    def test_create_and_update_shared_database(self):
+        original = b"original xls content"
+        digest = core.save_default_database(
+            self.database_url, "anagrafica.xls", original
+        )
+        info = core.get_default_database_info(self.database_url)
+        self.assertEqual(info["filename"], "anagrafica.xls")
+        self.assertEqual(info["sha256"], digest)
+        self.assertEqual(
+            core.get_default_database_content(self.database_url), original
+        )
+
+        replacement = b"updated xls content"
+        replacement_digest = core.save_default_database(
+            self.database_url, "anagrafica-aggiornata.xls", replacement
+        )
+        self.assertEqual(
+            core.get_default_database_info(self.database_url)["sha256"],
+            replacement_digest,
+        )
+        self.assertEqual(
+            core.get_default_database_content(self.database_url), replacement
+        )
+
+    def test_rejects_empty_shared_database(self):
+        with self.assertRaisesRegex(ValueError, "file Excel valido"):
+            core.save_default_database(self.database_url, "vuoto.xls", b"")
+
     def test_rejects_duplicate_owners_and_out_of_range_percentages(self):
         duplicate_payload = {
             **self.payload,

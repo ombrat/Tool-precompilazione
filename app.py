@@ -126,6 +126,35 @@ if archive_database_url:
     except Exception as error:
         archive_error = str(error)
 
+default_database_info, default_database_error = None, None
+if archive_database_url and not archive_error:
+    try:
+        default_database_info = core.get_default_database_info(archive_database_url)
+    except Exception as error:
+        default_database_error = str(error)
+
+if default_database_info:
+    if st.session_state.get("default_db_sha256") != default_database_info["sha256"]:
+        try:
+            default_database_bytes = core.get_default_database_content(archive_database_url)
+            if default_database_bytes is None:
+                raise ValueError("Il file dell'anagrafica condivisa non è disponibile.")
+            default_database_xls = core.load_xls_bytes(default_database_bytes)
+        except Exception as error:
+            default_database_error = str(error)
+            st.session_state.pop("default_db_xls", None)
+            st.session_state.pop("default_db_sha256", None)
+        else:
+            st.session_state["default_db_xls"] = default_database_xls
+            st.session_state["default_db_sha256"] = default_database_info["sha256"]
+elif not default_database_error:
+    st.session_state.pop("default_db_xls", None)
+    st.session_state.pop("default_db_sha256", None)
+
+active_xls_content = st.session_state.get("uploaded_xls") or st.session_state.get(
+    "default_db_xls"
+)
+
 profile_by_id = {profile["id"]: profile for profile in archive_profiles}
 tab_main, tab_archive, tab_db = st.tabs(["Documento", "Archivio", "Database"])
 
@@ -163,27 +192,15 @@ with tab_main:
                 [None] + list(profile_by_id)
             ):
                 st.session_state["doc_archive_id"] = None
-            if archive_database_url and not archive_error:
-                selected_archive_id = st.selectbox(
-                    "Scheda archiviata (opzionale)",
-                    [None] + list(profile_by_id),
-                    format_func=lambda value: (
-                        "Seleziona una scheda" if value is None
-                        else profile_by_id[value]["name"]
-                    ),
-                    key="doc_archive_id",
-                )
-            else:
-                selected_archive_id = None
+            selected_archive_id = st.session_state.get("doc_archive_id")
             selected_archive = profile_by_id.get(selected_archive_id)
             if selected_archive:
                 st.info(f"Scheda archiviata caricata: {selected_archive['name']}")
                 try:
-                    xls_content = st.session_state.get("uploaded_xls")
                     fresh_payload, archive_changes = core.refresh_archive_payload(
                         selected_archive["payload"],
-                        core.db_records("giuridica", xls_content),
-                        core.db_records("fisica", xls_content),
+                        core.db_records("giuridica", active_xls_content),
+                        core.db_records("fisica", active_xls_content),
                     )
                 except Exception:
                     fresh_payload, archive_changes = None, []
@@ -217,9 +234,8 @@ with tab_main:
                 rid = f"archive_{selected_archive['id']}"
             else:
                 try:
-                    xls_content = st.session_state.get("uploaded_xls")
-                    records = core.db_records(ctype, xls_content)
-                    cols = core.db_columns(ctype, xls_content)
+                    records = core.db_records(ctype, active_xls_content)
+                    cols = core.db_columns(ctype, active_xls_content)
                 except Exception as e:
                     records, cols = [], []
                     st.error(f"Errore database: {e}")
@@ -264,9 +280,8 @@ with tab_main:
             role_data = {}
             if roles and not selected_archive:
                 try:
-                    xls_content = st.session_state.get("uploaded_xls")
-                    people = core.db_records("fisica", xls_content)
-                    pcols = core.db_columns("fisica", xls_content)
+                    people = core.db_records("fisica", active_xls_content)
+                    pcols = core.db_columns("fisica", active_xls_content)
                 except Exception as e:
                     people, pcols = [], []
                     st.error(f"Errore database: {e}")
@@ -444,7 +459,7 @@ with tab_archive:
             st.session_state["archive_editor_loaded"] = selected_id
             st.rerun()
 
-        xls_content = st.session_state.get("uploaded_xls")
+        xls_content = active_xls_content
         if xls_content is None:
             st.warning(
                 "Per creare o modificare una scheda, carica prima il file Excel "
@@ -599,8 +614,23 @@ with tab_archive:
 
 with tab_db:
     s = core.load_settings()
+    if notice := st.session_state.pop("default_db_notice", None):
+        st.success(notice)
+    if default_database_error:
+        st.error(f"Impossibile caricare l'anagrafica condivisa: {default_database_error}")
+    elif default_database_info:
+        st.info(
+            f"Anagrafica condivisa: {default_database_info['filename']} "
+            f"(aggiornata il {default_database_info['updated_at']:%d/%m/%Y %H:%M})"
+        )
+    elif archive_database_url and not archive_error:
+        st.warning("Non è ancora stata salvata un'anagrafica condivisa.")
+    if archive_database_url and not archive_error:
+        st.caption(
+            "Chiunque abbia accesso all'app può sostituire l'anagrafica condivisa."
+        )
     db_up = st.file_uploader(
-        "Seleziona il database anagrafiche dal tuo computer (.xls)",
+        "Carica un database anagrafiche (.xls)",
         type=["xls"],
         key="db_upload",
     )
@@ -623,9 +653,29 @@ with tab_db:
             st.session_state["db_upkey"] = db_key
             st.rerun()
     active_db = db_up.name if db_up and st.session_state.get("uploaded_xls") else (
-        s["xls_path"] or "nessun file Excel (database SQL)"
+        f"{default_database_info['filename']} (condiviso)"
+        if default_database_info and active_xls_content
+        else s["xls_path"] or "nessun file Excel (database SQL)"
     )
     st.caption(f"Database in uso: {active_db}")
+    if db_up and st.session_state.get("uploaded_xls") and archive_database_url:
+        st.caption(
+            "Il file caricato è temporaneo finché non lo salvi come anagrafica condivisa."
+        )
+        if st.button("Salva o aggiorna l'anagrafica condivisa", type="primary"):
+            try:
+                digest = core.save_default_database(
+                    archive_database_url, db_up.name, db_bytes
+                )
+            except Exception as error:
+                st.error(f"Impossibile salvare l'anagrafica condivisa: {error}")
+            else:
+                st.session_state["default_db_xls"] = st.session_state["uploaded_xls"]
+                st.session_state["default_db_sha256"] = digest
+                st.session_state["default_db_notice"] = (
+                    "Anagrafica condivisa salvata e disponibile a tutti gli utenti."
+                )
+                st.rerun()
     s["xls_path"] = st.text_input("Percorso del file Excel (lascia vuoto per usare il database SQL)", s["xls_path"])
     s["db_url"] = st.text_input("URL database SQL (SQLAlchemy)", s["db_url"])
     for t, tl in core.CUSTOMER_TYPES.items():
