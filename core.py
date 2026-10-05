@@ -8,10 +8,13 @@ import re
 import subprocess
 import tempfile
 import unicodedata
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 from docx.text.run import Run
 from sqlalchemy import create_engine, text
 
@@ -52,6 +55,16 @@ def _cell(v):
     return str(v).strip()
 
 
+def _format_residence(rec):
+    location = " ".join(
+        value for value in (rec.get("Cap", "").strip(), rec.get("Località", "").strip()) if value
+    )
+    province = rec.get("Prov.", "").strip()
+    if province:
+        location = f"{location} ({province})" if location else f"({province})"
+    return ", ".join(value for value in (location, rec.get("Indirizzo", "").strip()) if value)
+
+
 @functools.lru_cache(maxsize=4)
 def _load_xls(path, mtime):
     """Legge il foglio Excel e separa persone fisiche (CF 16 caratteri) e giuridiche (CF 11)."""
@@ -66,7 +79,8 @@ def _load_xls(path, mtime):
             continue
         rec = dict(zip(header, vals))
         place = f"{rec.get('Località', '')} {rec.get('Prov.', '')}".strip()
-        rec["Residenza"] = rec["Sede legale"] = ", ".join(x for x in (place, rec.get("Indirizzo", "")) if x)
+        rec["Residenza"] = _format_residence(rec)
+        rec["Sede legale"] = ", ".join(x for x in (place, rec.get("Indirizzo", "")) if x)
         rec["id"] = rec.get("Codice") or i
         rows["giuridica" if len(rec.get("Codice Fiscale", "")) == 11 else "fisica"].append(rec)
     return header + ["Residenza", "Sede legale"], rows
@@ -204,7 +218,8 @@ def _paragraph_html(p, values):
             parts.append(f'<mark style="background:#b7f0c0;padding:0 2px;border-radius:3px">{shown}</mark>')
         else:
             parts.append(
-                f'<mark style="background:#ffe066;padding:0 2px;border-radius:3px">{_html.escape(m.group(0))}</mark>'
+                f'<mark style="background:#ffe066;border:1px solid #d32f2f;padding:0 2px;'
+                f'border-radius:3px">{_html.escape(m.group(0))}</mark>'
             )
         pos = m.end()
     parts.append(_chunk_html(text, styles, pos, len(text)))
@@ -243,7 +258,7 @@ def document_text(docx_bytes):
     return "\n".join(p.text for p in all_paragraphs(doc))
 
 
-def _set_run(run, before, value, after, hl=None):
+def _set_run(run, before, value, after, hl=None, border_color=None):
     if hl is None:
         run.text = before
         for i, line in enumerate(str(value).split("\n")):
@@ -264,13 +279,20 @@ def _set_run(run, before, value, after, hl=None):
             val_run.add_break()
         val_run.add_text(line)
     val_run.font.highlight_color = hl
+    if border_color:
+        border = OxmlElement("w:bdr")
+        border.set(qn("w:val"), "single")
+        border.set(qn("w:sz"), "8")
+        border.set(qn("w:space"), "1")
+        border.set(qn("w:color"), border_color)
+        val_run._r.get_or_add_rPr().append(border)
     if after:
         r_after = copy.deepcopy(template)
         r_val.addnext(r_after)
         Run(r_after, run._parent).text = after
 
 
-def _replace_span(p, start, end, value, hl=None):
+def _replace_span(p, start, end, value, hl=None, border_color=None):
     """Sostituisce p.text[start:end] con value (start == end inserisce); mantiene la formattazione del primo run coinvolto."""
     if not p.runs:
         p.add_run("")
@@ -283,7 +305,7 @@ def _replace_span(p, start, end, value, hl=None):
         if start == end:
             if r_start <= start <= r_end or i == len(runs) - 1:
                 k = min(max(start - r_start, 0), len(run.text))
-                _set_run(run, run.text[:k], value, run.text[k:], hl)
+                _set_run(run, run.text[:k], value, run.text[k:], hl, border_color)
                 return
             continue
         if r_end <= start or r_start >= end:
@@ -291,17 +313,17 @@ def _replace_span(p, start, end, value, hl=None):
         before = run.text[: max(start - r_start, 0)]
         after = run.text[max(end - r_start, 0):] if r_end > end else ""
         if first:
-            _set_run(run, before, value, after, hl)
+            _set_run(run, before, value, after, hl, border_color)
             first = False
         else:
             run.text = after
 
 
-def _replace_in_paragraph(p, token, value, hl=None):
+def _replace_in_paragraph(p, token, value, hl=None, border_color=None):
     # Unisce i run per gestire token spezzati.
     pos = 0
     while (start := p.text.find(token, pos)) >= 0:
-        _replace_span(p, start, start + len(token), value, hl)
+        _replace_span(p, start, start + len(token), value, hl, border_color)
         pos = start + len(str(value))
 
 
@@ -337,6 +359,8 @@ PREDEFINED = {
     "DOCUMENTO_DI_IDENTITA": ["numero_documento", "documento_di_identita"],
     "NUMERO_DOCUMENTO": ["documento_di_identita"],
     "RESIDENZA": ["residenza", "indirizzo"],
+    "COMMISSIONE_ANNUALE": [],
+    "COMMISSIONE_APERTURA": [],
     "RAGIONE_SOCIALE": ["ragione_sociale"],
     "SEDE_LEGALE": ["sede_legale"],
     "CODICE_FISCALE": ["codice_fiscale", "cf"],
@@ -359,6 +383,96 @@ def format_field_value(name, value):
             "03": "PASSAPORTO",
         }.get(code, value)
     return value
+
+
+_COMMISSION_FIELDS = {"COMMISSIONE_ANNUALE", "COMMISSIONE_APERTURA"}
+_UNIT_WORDS = (
+    "zero", "uno", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove",
+    "dieci", "undici", "dodici", "tredici", "quattordici", "quindici", "sedici",
+    "diciassette", "diciotto", "diciannove",
+)
+
+
+def _under_hundred(value):
+    if value < 20:
+        return _UNIT_WORDS[value]
+    tens = ("", "", "venti", "trenta", "quaranta", "cinquanta", "sessanta", "settanta", "ottanta", "novanta")
+    word = tens[value // 10]
+    unit = value % 10
+    if unit in {1, 8}:
+        word = word[:-1]
+    return word + (_UNIT_WORDS[unit] if unit else "")
+
+
+def _under_thousand(value):
+    hundreds, remainder = divmod(value, 100)
+    word = ("" if hundreds == 0 else "cento" if hundreds == 1 else _UNIT_WORDS[hundreds] + "cento")
+    if remainder:
+        rest = _under_hundred(remainder)
+        if hundreds and rest.startswith("otto"):
+            word = word[:-1]
+        word += rest
+    return word or "zero"
+
+
+def _integer_words(value):
+    if value < 1000:
+        return _under_thousand(value)
+    if value < 1_000_000:
+        thousands, remainder = divmod(value, 1000)
+        thousand_word = _integer_words(thousands)
+        if thousands == 1:
+            prefix = "mille"
+        else:
+            if thousand_word.endswith("uno"):
+                thousand_word = thousand_word[:-1]
+            prefix = thousand_word + "mila"
+        return prefix + (_integer_words(remainder) if remainder else "")
+    if value < 1_000_000_000:
+        millions, remainder = divmod(value, 1_000_000)
+        prefix = "un milione" if millions == 1 else f"{_integer_words(millions)} milioni"
+        return prefix + (f" {_integer_words(remainder)}" if remainder else "")
+    billions, remainder = divmod(value, 1_000_000_000)
+    prefix = "un miliardo" if billions == 1 else f"{_integer_words(billions)} miliardi"
+    return prefix + (f" {_integer_words(remainder)}" if remainder else "")
+
+
+def format_commission_value(name, value):
+    """Format commission inputs as Italian numeric amounts followed by the amount in words."""
+    if _norm(name).upper() not in _COMMISSION_FIELDS:
+        return "" if value is None else str(value)
+    raw = "" if value is None else str(value).strip()
+    if not raw:
+        return ""
+
+    normalized = raw.replace(" ", "")
+    if "," in normalized and "." in normalized:
+        valid = re.fullmatch(r"\d{1,3}(?:\.\d{3})+,\d{1,2}", normalized)
+        normalized = normalized.replace(".", "").replace(",", ".") if valid else ""
+    elif "," in normalized:
+        valid = re.fullmatch(r"\d+,\d{1,2}", normalized)
+        normalized = normalized.replace(",", ".") if valid else ""
+    elif "." in normalized:
+        if re.fullmatch(r"\d{1,3}(?:\.\d{3})+", normalized):
+            normalized = normalized.replace(".", "")
+        elif not re.fullmatch(r"\d+\.\d{1,2}", normalized):
+            normalized = ""
+    elif not re.fullmatch(r"\d+", normalized):
+        normalized = ""
+
+    try:
+        amount = Decimal(normalized)
+    except InvalidOperation as exc:
+        raise ValueError("inserisci un importo numerico con al massimo due decimali") from exc
+    if amount < 0 or amount.as_tuple().exponent < -2:
+        raise ValueError("inserisci un importo positivo con al massimo due decimali")
+    if amount > Decimal("999999999999.99"):
+        raise ValueError("l'importo massimo supportato è 999.999.999.999,99")
+
+    cents_total = int(amount * 100)
+    whole, cents = divmod(cents_total, 100)
+    formatted = f"{whole:,}".replace(",", ".") + f",{cents:02d}"
+    return f"{formatted} ({_integer_words(whole)}/{cents:02d})"
 
 
 # Campi che non hanno senso per un tipo di cliente
@@ -397,10 +511,12 @@ def render(docx_bytes, fields, values, preview=False):
             for token in f.get("tokens") or [f["token"]]:
                 if not preview:
                     _replace_in_paragraph(p, token, value)
-                elif value:
+                elif str(value).strip():
                     _replace_in_paragraph(p, token, value, WD_COLOR_INDEX.BRIGHT_GREEN)
                 else:
-                    _replace_in_paragraph(p, token, token, WD_COLOR_INDEX.YELLOW)
+                    _replace_in_paragraph(
+                        p, token, token, WD_COLOR_INDEX.YELLOW, border_color="D32F2F"
+                    )
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()

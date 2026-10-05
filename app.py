@@ -5,6 +5,19 @@ import streamlit as st
 import core
 
 st.set_page_config(page_title="Precompilazione documenti", layout="wide")
+st.markdown(
+    """
+    <style>
+    div[class*="st-key-missing-field-"] {
+        border: 2px solid #d32f2f !important;
+        border-radius: 0.5rem;
+        padding: 0.4rem 0.65rem;
+        margin-bottom: 0.5rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 _REFRESH_FIELD_WIDGETS = {
     "DATA_EMISSIONE", "DATA_DI_RILASCIO", "DOCUMENTO_DI_IDENTITA", "NUMERO_DOCUMENTO",
@@ -13,6 +26,22 @@ _REFRESH_FIELD_WIDGETS = {
 
 def _field_widget_revision(name):
     return "_v2" if core._norm(name).upper() in _REFRESH_FIELD_WIDGETS else ""
+
+
+def _render_field_widget(name, label, initial, widget_key, multiline=False):
+    current = st.session_state.get(widget_key, initial)
+    missing = not str(current or "").strip()
+    if not missing and core._norm(name).upper() in {"COMMISSIONE_ANNUALE", "COMMISSIONE_APERTURA"}:
+        try:
+            core.format_commission_value(name, current)
+        except ValueError:
+            missing = True
+    state_key = "missing-field-" if missing else "filled-field-"
+    container_key = state_key + core._norm(widget_key)
+    with st.container(key=container_key, border=missing):
+        if multiline:
+            return st.text_area(label, value=initial, height=130, key=widget_key)
+        return st.text_input(label, value=initial, key=widget_key)
 
 
 @st.cache_data(show_spinner=False, max_entries=20)
@@ -81,15 +110,21 @@ with tab_main:
 
             st.markdown("**Campi del documento**")
             values = {}
+            invalid_commission = False
             for key in main_keys:
                 label = key.replace("_", " ").capitalize()
                 col = mapping.get(key)
                 init = core.format_field_value(key, rec.get(col) if col else None)
                 k = f"v_{rid}_{key}{_field_widget_revision(key)}"
-                if key in core.PREDEFINED:
-                    values[key] = core.format_field_value(key, st.text_input(label, value=init, key=k))
+                raw_value = _render_field_widget(key, label, init, k, multiline=key not in core.PREDEFINED)
+                try:
+                    values[key] = core.format_commission_value(key, raw_value)
+                except ValueError as e:
+                    values[key] = ""
+                    st.error(f"{label}: {e}")
+                    invalid_commission = True
                 else:
-                    values[key] = st.text_area(label, value=init, height=130, key=k)
+                    values[key] = core.format_field_value(key, values[key])
 
             if roles:
                 try:
@@ -118,11 +153,13 @@ with tab_main:
                             col = core.guess_column(base, pcols, "fisica")
                             init = core.format_field_value(base, person.get(col) if col else None)
                             k = f"v_{key}_{person.get('id', '')}{key_revision}"
-                        values[key] = core.format_field_value(base, st.text_input(label, value=init, key=k))
+                        values[key] = core.format_field_value(
+                            base, _render_field_widget(base, label, init, k)
+                        )
             if not placeholders:
                 st.warning("Nessun segnaposto trovato (es. [NOME], [COGNOME]).")
 
-            if st.button("Genera documento", type="primary"):
+            if st.button("Genera documento", type="primary", disabled=invalid_commission):
                 fields = [{"name": k, "tokens": t} for k, t in placeholders.items()]
                 with st.spinner("Generazione..."):
                     out = core.render(data, fields, values)
@@ -137,7 +174,7 @@ with tab_main:
 
         with right:
             st.subheader("Anteprima")
-            st.caption("Giallo: segnaposto da compilare. Verde: valore inserito.")
+            st.caption("Bordo rosso: campo non compilato. Verde: valore inserito.")
             fields = [{"name": k, "tokens": t} for k, t in placeholders.items()]
             with st.container(height=800, border=True):
                 with st.spinner("Aggiornamento anteprima..."):
