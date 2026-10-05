@@ -1,3 +1,4 @@
+import base64
 import copy
 import functools
 import hashlib
@@ -1039,3 +1040,12 @@ def auth_verify_totp(supabase_url, api_key, token, factor_id, code):
         {"challenge_id": challenge["id"], "code": code.strip()},
         token=token,
     )
+
+
+def totp_qr_data_uri(totp):
+    """Restituisce il QR del fattore TOTP come data URI SVG visualizzabile in un tag <img>."""
+    qr_code = totp.get("qr_code") or ""
+    if qr_code.startswith("data:"):
+        qr_code = qr_code.split(",", 1)[1]
+    qr_code = urllib.parse.unquote(qr_code)
+    return "data:image/svg+xml;base64," + base64.b64encode(qr_code.encode()).decode()

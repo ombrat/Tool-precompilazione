@@ -2,6 +2,7 @@ import io
 import json
 import tempfile
 import urllib.error
+import urllib.parse
 import unittest
 import unittest.mock
 from unittest.mock import patch
@@ -256,6 +257,22 @@ class SupabaseAuthTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "Invalid login credentials"):
             core.auth_sign_in("https://p.supabase.co", "sb_publishable_x", "a@b.it", "bad")
+
+
+class TotpQrTests(unittest.TestCase):
+    def test_accepts_data_uri_and_raw_svg(self):
+        svg = '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>'
+        expected = core.totp_qr_data_uri({"qr_code": svg})
+        self.assertTrue(expected.startswith("data:image/svg+xml;base64,"))
+        self.assertEqual(
+            core.totp_qr_data_uri({"qr_code": "data:image/svg+xml;utf-8," + svg}), expected
+        )
+        self.assertEqual(
+            core.totp_qr_data_uri(
+                {"qr_code": "data:image/svg+xml;utf-8," + urllib.parse.quote(svg)}
+            ),
+            expected,
+        )
 
 
 if __name__ == "__main__":

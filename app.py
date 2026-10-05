@@ -85,9 +85,11 @@ if not st.session_state.get("authenticated"):
                 st.error(str(error))
                 st.stop()
         enroll = st.session_state["auth_enroll"]
-        qr_code = enroll["totp"]["qr_code"]
-        if qr_code.startswith("data:image/svg+xml"):
-            st.image(qr_code.split(",", 1)[1])
+        st.markdown(
+            f'<img src="{core.totp_qr_data_uri(enroll["totp"])}" width="220" alt="Codice QR">',
+            unsafe_allow_html=True,
+        )
+        st.caption("Se non riesci a scansionare il QR, inserisci manualmente questa chiave:")
         st.code(enroll["totp"]["secret"], language=None)
         factor_id = enroll["id"]
     else:
