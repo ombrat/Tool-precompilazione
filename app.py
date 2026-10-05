@@ -178,6 +178,32 @@ with tab_main:
             selected_archive = profile_by_id.get(selected_archive_id)
             if selected_archive:
                 st.info(f"Scheda archiviata caricata: {selected_archive['name']}")
+                try:
+                    xls_content = st.session_state.get("uploaded_xls")
+                    fresh_payload, archive_changes = core.refresh_archive_payload(
+                        selected_archive["payload"],
+                        core.db_records("giuridica", xls_content),
+                        core.db_records("fisica", xls_content),
+                    )
+                except Exception:
+                    fresh_payload, archive_changes = None, []
+                if archive_changes:
+                    st.warning(
+                        f"Il database contiene {len(archive_changes)} dati diversi o nuovi rispetto alla scheda."
+                    )
+                    with st.expander("Vedi differenze"):
+                        for label, field, old_value, new_value in archive_changes:
+                            st.write(f"**{label}** - {field}: `{old_value or '(vuoto)'}` → `{new_value}`")
+                    if st.button("Aggiorna scheda con i dati del database", key="doc_refresh_profile"):
+                        try:
+                            core.save_archive_profile(
+                                archive_database_url, selected_archive["name"],
+                                fresh_payload, profile_id=selected_archive["id"],
+                            )
+                        except Exception as error:
+                            st.error(f"Impossibile aggiornare la scheda: {error}")
+                        else:
+                            st.rerun()
                 ctype = "giuridica"
             else:
                 ctype = st.radio(
@@ -206,6 +232,18 @@ with tab_main:
                     )
                     rec = records[idx]
                     rid = f"{ctype}_{rec.get('id', idx)}"
+                    if ctype == "giuridica" and archive_database_url and not archive_error:
+                        match = next(
+                            (p for p in archive_profiles
+                             if core.record_identity(p["payload"]["company"]) == core.record_identity(rec)),
+                            None,
+                        )
+                        if match:
+                            st.info(f"Esiste una scheda salvata per questa società: {match['name']}")
+                            st.button(
+                                "Usa scheda salvata", key="doc_use_saved",
+                                on_click=lambda pid=match["id"]: st.session_state.update(doc_archive_id=pid),
+                            )
 
             mapping = {}
             with st.expander("Collegamento campi / colonne database"):

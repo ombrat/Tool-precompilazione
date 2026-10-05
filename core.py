@@ -170,6 +170,44 @@ def record_identity(record):
     return f"name:{_norm(record_label('fisica', record))}"
 
 
+def _refresh_record(old, current):
+    updated, changes = dict(old), []
+    by_norm = {_norm(k): k for k in old}
+    for key, value in current.items():
+        if key == "id" or value is None or str(value).strip() == "":
+            continue
+        target = by_norm.get(_norm(key), key)
+        previous = old.get(target)
+        if str(previous or "").strip() != str(value).strip():
+            changes.append((target, previous, value))
+            updated[target] = value
+    return updated, changes
+
+
+def refresh_archive_payload(payload, companies, people):
+    """Confronta la scheda con i dati correnti del database e li aggiorna."""
+    payload = copy.deepcopy(payload)
+    changes = []
+    company_index = {record_identity(r): r for r in companies}
+    people_index = {record_identity(r): r for r in people}
+
+    def refresh(label, record, index):
+        current = index.get(record_identity(record))
+        if not current:
+            return record
+        record, diff = _refresh_record(record, current)
+        changes.extend((label, *item) for item in diff)
+        return record
+
+    payload["company"] = refresh("Società", payload["company"], company_index)
+    payload["legal_representative"] = refresh(
+        "Legale rappresentante", payload["legal_representative"], people_index
+    )
+    for number, owner in enumerate(payload.get("owners", []), 1):
+        owner["person"] = refresh(f"Titolare effettivo {number}", owner["person"], people_index)
+    return payload, changes
+
+
 @functools.lru_cache(maxsize=2)
 def _archive_engine(database_url):
     if database_url.startswith("postgres://"):
