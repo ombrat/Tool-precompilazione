@@ -21,6 +21,7 @@ st.markdown(
 
 _REFRESH_FIELD_WIDGETS = {
     "DATA_EMISSIONE", "DATA_DI_RILASCIO", "DOCUMENTO_DI_IDENTITA", "NUMERO_DOCUMENTO",
+    "RAGIONE_SOCIALE", "NOME_SOCIETA", "NOME_DELLA_SOCIETA", "DENOMINAZIONE", "RUOLO",
 }
 
 
@@ -42,6 +43,21 @@ def _render_field_widget(name, label, initial, widget_key, multiline=False):
         if multiline:
             return st.text_area(label, value=initial, height=130, key=widget_key)
         return st.text_input(label, value=initial, key=widget_key)
+
+
+def _render_document_field(key, record, mapping, record_id):
+    label = key.replace("_", " ").capitalize()
+    col = mapping.get(key)
+    initial = core.format_field_value(key, record.get(col) if col else None)
+    widget_key = f"v_{record_id}_{key}{_field_widget_revision(key)}"
+    raw_value = _render_field_widget(
+        key, label, initial, widget_key, multiline=core._norm(key).upper() not in core.PREDEFINED
+    )
+    try:
+        return core.format_field_value(key, core.format_commission_value(key, raw_value)), False
+    except ValueError as error:
+        st.error(f"{label}: {error}")
+        return "", True
 
 
 @st.cache_data(show_spinner=False, max_entries=20)
@@ -81,6 +97,7 @@ with tab_main:
                 "Tipo di cliente", list(core.CUSTOMER_TYPES),
                 format_func=core.CUSTOMER_TYPES.get, horizontal=True,
             )
+            roles = core.roles_for_customer_type(roles, ctype)
             try:
                 records = core.db_records(ctype)
                 cols = core.db_columns(ctype)
@@ -108,24 +125,7 @@ with tab_main:
                     )
                     mapping[key] = None if sel == "(nessuna)" else sel
 
-            st.markdown("**Campi del documento**")
             values = {}
-            invalid_commission = False
-            for key in main_keys:
-                label = key.replace("_", " ").capitalize()
-                col = mapping.get(key)
-                init = core.format_field_value(key, rec.get(col) if col else None)
-                k = f"v_{rid}_{key}{_field_widget_revision(key)}"
-                raw_value = _render_field_widget(key, label, init, k, multiline=key not in core.PREDEFINED)
-                try:
-                    values[key] = core.format_commission_value(key, raw_value)
-                except ValueError as e:
-                    values[key] = ""
-                    st.error(f"{label}: {e}")
-                    invalid_commission = True
-                else:
-                    values[key] = core.format_field_value(key, values[key])
-
             if roles:
                 try:
                     people, pcols = core.db_records("fisica"), core.db_columns("fisica")
@@ -143,11 +143,12 @@ with tab_main:
                     carica = st.selectbox("Carica", core.CARICHE, index=None, placeholder="Seleziona la carica", key=f"car_{role}")
                     if carica == "Altro":
                         carica = st.text_input("Specifica la carica", key=f"caro_{role}")
-                    for key in keys:
+
+                    def render_role_field(key):
                         base = core.split_role(key)[0]
                         label = base.replace("_", " ").capitalize()
                         key_revision = _field_widget_revision(base)
-                        if base == "CARICA":
+                        if base in {"CARICA", "RUOLO"}:
                             init, k = carica or "", f"v_{key}_{carica}{key_revision}"
                         else:
                             col = core.guess_column(base, pcols, "fisica")
@@ -156,6 +157,34 @@ with tab_main:
                         values[key] = core.format_field_value(
                             base, _render_field_widget(base, label, init, k)
                         )
+                    visible_role_keys = [
+                        key for key in keys if not core.is_anagraphic_field(key)
+                    ]
+                    anagraphic_role_keys = [
+                        key for key in keys if core.is_anagraphic_field(key)
+                    ]
+                    for key in visible_role_keys:
+                        render_role_field(key)
+                    if anagraphic_role_keys:
+                        with st.expander(
+                            f"Dati anagrafici - {core.role_label(role)}", expanded=False
+                        ):
+                            for key in anagraphic_role_keys:
+                                render_role_field(key)
+
+            st.markdown("**Campi del documento**")
+            invalid_commission = False
+            visible_main_keys = [key for key in main_keys if not core.is_anagraphic_field(key)]
+            anagraphic_main_keys = [key for key in main_keys if core.is_anagraphic_field(key)]
+            for key in visible_main_keys:
+                values[key], invalid = _render_document_field(key, rec, mapping, rid)
+                invalid_commission |= invalid
+            if anagraphic_main_keys:
+                with st.expander("Dati anagrafici", expanded=False):
+                    for key in anagraphic_main_keys:
+                        values[key], invalid = _render_document_field(key, rec, mapping, rid)
+                        invalid_commission |= invalid
+
             if not placeholders:
                 st.warning("Nessun segnaposto trovato (es. [NOME], [COGNOME]).")
 

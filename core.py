@@ -168,10 +168,25 @@ def split_role(key):
     return (m.group(1), m.group(2)) if m else (key, None)
 
 
+def is_anagraphic_field(name):
+    normalized = _norm(split_role(name)[0]).upper()
+    if any(term in normalized for term in ("PREMESSA", "COMMISSIONE", "PERCENT")):
+        return False
+    return normalized in PREDEFINED
+
+
 def role_label(role):
     if role == "LR":
         return "Legale rappresentante"
     return f"Titolare effettivo {role[2:]}".strip()
+
+
+def roles_for_customer_type(roles, ctype):
+    if ctype != "giuridica":
+        return roles
+    ordered = {"LR": roles.get("LR", []), "TE1": roles.get("TE1", [])}
+    ordered.update((role, keys) for role, keys in roles.items() if role not in ordered)
+    return ordered
 
 
 def find_placeholders(docx_bytes):
@@ -327,6 +342,13 @@ def _replace_in_paragraph(p, token, value, hl=None, border_color=None):
         pos = start + len(str(value))
 
 
+def _clear_remaining_placeholders(paragraphs):
+    for paragraph in paragraphs:
+        tokens = {match.group(0) for match in PLACEHOLDER_RE.finditer(paragraph.text)}
+        for token in tokens:
+            _replace_in_paragraph(paragraph, token, "")
+
+
 def doc_paragraphs(docx_bytes):
     """Testi dei paragrafi, nello stesso ordine usato da apply_placeholder."""
     doc = Document(io.BytesIO(docx_bytes))
@@ -361,7 +383,10 @@ PREDEFINED = {
     "RESIDENZA": ["residenza", "indirizzo"],
     "COMMISSIONE_ANNUALE": [],
     "COMMISSIONE_APERTURA": [],
-    "RAGIONE_SOCIALE": ["ragione_sociale"],
+    "RAGIONE_SOCIALE": ["cognome", "ragione_sociale", "denominazione", "nome_societa"],
+    "NOME_SOCIETA": ["ragione_sociale", "denominazione", "cognome"],
+    "NOME_DELLA_SOCIETA": ["ragione_sociale", "denominazione", "cognome"],
+    "DENOMINAZIONE": ["ragione_sociale", "nome_societa", "cognome"],
     "SEDE_LEGALE": ["sede_legale"],
     "CODICE_FISCALE": ["codice_fiscale", "cf"],
     "PARTITA_IVA": ["partita_iva", "piva"],
@@ -476,7 +501,7 @@ def format_commission_value(name, value):
 
 
 # Campi che non hanno senso per un tipo di cliente
-ONLY_FISICA = {"NOME", "COGNOME", "DATA_DI_NASCITA", "LUOGO_DI_NASCITA", "RESIDENZA"}
+ONLY_FISICA = {"NOME", "COGNOME", "DATA_DI_NASCITA", "LUOGO_DI_NASCITA"}
 ONLY_GIURIDICA = {"RAGIONE_SOCIALE", "SEDE_LEGALE"}
 
 
@@ -486,7 +511,10 @@ def guess_column(name, columns, ctype=None):
         ctype == "fisica" and normalized_name in ONLY_GIURIDICA
     ):
         return None
-    cands = PREDEFINED.get(normalized_name, []) + [normalized_name.lower()]
+    cands = PREDEFINED.get(normalized_name, []).copy()
+    if ctype == "giuridica" and normalized_name == "RESIDENZA":
+        cands.insert(0, "sede_legale")
+    cands.append(normalized_name.lower())
     if ctype == "giuridica" and normalized_name == "RAGIONE_SOCIALE":
         cands.append("cognome")
     lowered = {_norm(c): c for c in columns}
@@ -517,6 +545,8 @@ def render(docx_bytes, fields, values, preview=False):
                     _replace_in_paragraph(
                         p, token, token, WD_COLOR_INDEX.YELLOW, border_color="D32F2F"
                     )
+    if not preview:
+        _clear_remaining_placeholders(paragraphs)
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
