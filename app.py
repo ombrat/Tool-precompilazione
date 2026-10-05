@@ -1,10 +1,42 @@
+import hashlib
+import hmac
 import json
+import os
 
 import streamlit as st
+from streamlit.errors import StreamlitSecretNotFoundError
 
 import core
 
 st.set_page_config(page_title="Precompilazione documenti", layout="wide")
+
+try:
+    secrets_password = st.secrets.get("APP_PASSWORD", "")
+except StreamlitSecretNotFoundError:
+    secrets_password = ""
+app_password = os.environ.get("APP_PASSWORD") or secrets_password
+if not isinstance(app_password, str) or not app_password:
+    st.error(
+        "Accesso non configurato. Imposta il segreto APP_PASSWORD prima di avviare l'app."
+    )
+    st.stop()
+
+if not st.session_state.get("authenticated"):
+    st.title("Accesso")
+    with st.form("login"):
+        entered_password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Accedi")
+    if submitted:
+        if hmac.compare_digest(entered_password, app_password):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        st.error("Password non valida.")
+    st.stop()
+
+if st.sidebar.button("Esci"):
+    st.session_state.clear()
+    st.rerun()
+
 st.markdown(
     """
     <style>
@@ -110,8 +142,9 @@ with tab_main:
             )
             roles = core.roles_for_customer_type(roles, ctype)
             try:
-                records = core.db_records(ctype)
-                cols = core.db_columns(ctype)
+                xls_content = st.session_state.get("uploaded_xls")
+                records = core.db_records(ctype, xls_content)
+                cols = core.db_columns(ctype, xls_content)
             except Exception as e:
                 records, cols = [], []
                 st.error(f"Errore database: {e}")
@@ -142,7 +175,9 @@ with tab_main:
             values = {}
             if roles:
                 try:
-                    people, pcols = core.db_records("fisica"), core.db_columns("fisica")
+                    xls_content = st.session_state.get("uploaded_xls")
+                    people = core.db_records("fisica", xls_content)
+                    pcols = core.db_columns("fisica", xls_content)
                 except Exception as e:
                     people, pcols = [], []
                     st.error(f"Errore database: {e}")
@@ -226,16 +261,33 @@ with tab_main:
 
 with tab_db:
     s = core.load_settings()
-    db_up = st.file_uploader("Seleziona il database anagrafiche dal tuo computer (.xls)", type=["xls"])
-    if db_up and st.session_state.get("db_upkey") != (db_up.name, db_up.size):
-        target = core.BASE / "data" / db_up.name
-        target.parent.mkdir(exist_ok=True)
-        target.write_bytes(db_up.getvalue())
-        s["xls_path"] = str(target)
-        core.save_settings(s)
-        st.session_state["db_upkey"] = (db_up.name, db_up.size)
-        st.rerun()
-    st.caption(f"Database in uso: {s['xls_path'] or 'nessun file Excel (database SQL)'}")
+    db_up = st.file_uploader(
+        "Seleziona il database anagrafiche dal tuo computer (.xls)",
+        type=["xls"],
+        key="db_upload",
+    )
+    if not db_up:
+        if st.session_state.pop("uploaded_xls", None) is not None:
+            st.session_state.pop("db_upkey", None)
+            st.rerun()
+    if db_up:
+        db_bytes = db_up.getvalue()
+        db_key = (db_up.name, len(db_bytes), hashlib.sha256(db_bytes).digest())
+    else:
+        db_key = None
+    if db_up and st.session_state.get("db_upkey") != db_key:
+        try:
+            st.session_state["uploaded_xls"] = core.load_xls_bytes(db_bytes)
+        except Exception as error:
+            st.session_state.pop("uploaded_xls", None)
+            st.error(f"Impossibile leggere il database Excel: {error}")
+        else:
+            st.session_state["db_upkey"] = db_key
+            st.rerun()
+    active_db = db_up.name if db_up and st.session_state.get("uploaded_xls") else (
+        s["xls_path"] or "nessun file Excel (database SQL)"
+    )
+    st.caption(f"Database in uso: {active_db}")
     s["xls_path"] = st.text_input("Percorso del file Excel (lascia vuoto per usare il database SQL)", s["xls_path"])
     s["db_url"] = st.text_input("URL database SQL (SQLAlchemy)", s["db_url"])
     for t, tl in core.CUSTOMER_TYPES.items():

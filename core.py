@@ -66,12 +66,7 @@ def _format_residence(rec):
     return ", ".join(value for value in (location, rec.get("Indirizzo", "").strip()) if value)
 
 
-@functools.lru_cache(maxsize=4)
-def _load_xls(path, mtime):
-    """Legge il foglio Excel e separa persone fisiche (CF 16 caratteri) e giuridiche (CF 11)."""
-    import xlrd
-
-    sheet = xlrd.open_workbook(path, logfile=io.StringIO()).sheet_by_index(0)
+def _records_from_xls_sheet(sheet):
     header = [str(h).strip() for h in sheet.row_values(0)]
     rows = {"fisica": [], "giuridica": []}
     for i in range(1, sheet.nrows):
@@ -87,6 +82,25 @@ def _load_xls(path, mtime):
     return header + ["Residenza", "Sede legale"], rows
 
 
+@functools.lru_cache(maxsize=4)
+def _load_xls(path, mtime):
+    """Legge il foglio Excel e separa persone fisiche (CF 16 caratteri) e giuridiche (CF 11)."""
+    import xlrd
+
+    sheet = xlrd.open_workbook(path, logfile=io.StringIO()).sheet_by_index(0)
+    return _records_from_xls_sheet(sheet)
+
+
+def load_xls_bytes(data):
+    """Legge un database Excel caricato in memoria, senza salvarlo sul server."""
+    import xlrd
+
+    sheet = xlrd.open_workbook(
+        file_contents=data, logfile=io.StringIO()
+    ).sheet_by_index(0)
+    return _records_from_xls_sheet(sheet)
+
+
 def _xls():
     path = Path(load_settings().get("xls_path") or "")
     return _load_xls(str(path), path.stat().st_mtime) if path.is_file() else None
@@ -96,7 +110,9 @@ def _engine():
     return create_engine(load_settings()["db_url"])
 
 
-def db_columns(ctype):
+def db_columns(ctype, xls_content=None):
+    if xls_content is not None:
+        return xls_content[0]
     if x := _xls():
         return x[0]
     table = load_settings()["tables"][ctype]
@@ -104,7 +120,9 @@ def db_columns(ctype):
         return list(c.execute(text(f'SELECT * FROM "{table}" LIMIT 0')).keys())
 
 
-def db_records(ctype):
+def db_records(ctype, xls_content=None):
+    if xls_content is not None:
+        return xls_content[1][ctype]
     if x := _xls():
         return x[1][ctype]
     table = load_settings()["tables"][ctype]
