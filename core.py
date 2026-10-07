@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -106,6 +107,16 @@ def _format_residence(rec):
     return ", ".join(value for value in (location, rec.get("Indirizzo", "").strip()) if value)
 
 
+def classify_customer_type(fiscal_code):
+    """Classifica il cliente dal primo carattere del codice fiscale."""
+    first = str(fiscal_code or "").strip()[:1]
+    if first.isalpha():
+        return "fisica"
+    if first.isdigit():
+        return "giuridica"
+    return None
+
+
 def _records_from_xls_sheet(sheet):
     header = [str(h).strip() for h in sheet.row_values(0)]
     rows = {"fisica": [], "giuridica": []}
@@ -118,7 +129,9 @@ def _records_from_xls_sheet(sheet):
         rec["Residenza"] = _format_residence(rec)
         rec["Sede legale"] = ", ".join(x for x in (place, rec.get("Indirizzo", "")) if x)
         rec["id"] = rec.get("Codice") or i
-        rows["giuridica" if len(rec.get("Codice Fiscale", "")) == 11 else "fisica"].append(rec)
+        customer_type = classify_customer_type(rec.get("Codice Fiscale"))
+        # Keep unclassifiable records available to the existing single-document flow.
+        rows[customer_type or "fisica"].append(rec)
     return header + ["Residenza", "Sede legale"], rows
 
 
@@ -899,6 +912,15 @@ def render(docx_bytes, fields, values, preview=False):
         _clear_remaining_placeholders(paragraphs)
     out = io.BytesIO()
     doc.save(out)
+    return out.getvalue()
+
+
+def create_document_archive(documents):
+    """Crea uno ZIP di documenti distinti; documents contiene coppie nome/contenuto."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for filename, content in documents:
+            archive.writestr(filename, content)
     return out.getvalue()
 
 

@@ -261,7 +261,9 @@ active_xls_content = st.session_state.get("uploaded_xls") or st.session_state.ge
 )
 
 profile_by_id = {profile["id"]: profile for profile in archive_profiles}
-tab_main, tab_archive, tab_db = st.tabs(["Documento", "Archivio", "Database"])
+tab_main, tab_bulk, tab_archive, tab_db = st.tabs(
+    ["Documento singolo", "Generazione massiva", "Archivio", "Database"]
+)
 
 with tab_main:
     selected_archive_for_type = profile_by_id.get(
@@ -563,6 +565,387 @@ with tab_main:
                 with st.spinner("Aggiornamento anteprima..."):
                     for img in cached_preview(data, json.dumps(fields), json.dumps(values)):
                         st.image(img, width="stretch")
+
+with tab_bulk:
+    st.subheader("Generazione massiva")
+    st.caption(
+        "Seleziona più anagrafiche: per ciascuna verrà creato un mandato separato. "
+        "I codici fiscali che iniziano con una lettera sono persone fisiche; "
+        "quelli che iniziano con un numero sono persone giuridiche."
+    )
+
+    mass_templates = {}
+    for customer_type, label in core.CUSTOMER_TYPES.items():
+        with st.expander(f"Modello {label.lower()}", expanded=False):
+            uploaded_template = st.file_uploader(
+                f"Modello locale {label.lower()} (.doc / .docx)",
+                type=["doc", "docx"],
+                key=f"mass_template_{customer_type}",
+            )
+        try:
+            if uploaded_template:
+                template_name = uploaded_template.name
+                template_bytes = uploaded_template.getvalue()
+                template_format = template_name.rsplit(".", 1)[-1].lower()
+            elif supabase_url and supabase_service_role_key:
+                template_bytes, template_name = cached_supabase_template(
+                    supabase_url, supabase_service_role_key, templates_bucket, customer_type
+                )
+                template_format = template_name.rsplit(".", 1)[-1].lower()
+                st.caption(f"Modello {label.lower()} caricato da Supabase: {template_name}")
+            else:
+                continue
+            docx_template = (
+                core.convert(template_bytes, "doc", "docx")
+                if template_format == "doc"
+                else template_bytes
+            )
+            mass_templates[customer_type] = {
+                "name": template_name,
+                "format": template_format,
+                "docx": docx_template,
+                "placeholders": core.find_placeholders(docx_template),
+            }
+        except Exception as error:
+            st.error(f"Impossibile caricare il modello {label.lower()}: {error}")
+
+    if not supabase_url or not supabase_service_role_key:
+        st.info(
+            "Carica un modello locale per ogni tipo di persona da includere, "
+            "oppure configura Supabase Storage."
+        )
+
+    if active_xls_content is None:
+        st.warning("Carica o configura prima un'anagrafica nella scheda Database.")
+    elif not mass_templates:
+        st.warning("Per iniziare, rendi disponibile almeno un modello valido.")
+    else:
+        try:
+            bulk_records = {}
+            for customer_type in core.CUSTOMER_TYPES:
+                if customer_type not in mass_templates:
+                    continue
+                for index, record in enumerate(
+                    core.db_records(customer_type, active_xls_content)
+                ):
+                    fiscal_code_column = core.guess_column(
+                        "CODICE_FISCALE", record.keys(), customer_type
+                    )
+                    actual_type = core.classify_customer_type(
+                        record.get(fiscal_code_column) if fiscal_code_column else None
+                    )
+                    if actual_type != customer_type:
+                        continue
+                    option_key = f"{customer_type}:{core.record_identity(record)}"
+                    if option_key in bulk_records:
+                        option_key = f"{option_key}:{index}"
+                    bulk_records[option_key] = (customer_type, record)
+        except Exception as error:
+            bulk_records = {}
+            st.error(f"Impossibile leggere le anagrafiche: {error}")
+
+        if bulk_records:
+            people = [
+                person
+                for person in core.db_records("fisica", active_xls_content)
+                if core.classify_customer_type(
+                    (
+                        person.get(column)
+                        if (column := core.guess_column(
+                            "CODICE_FISCALE", person.keys(), "fisica"
+                        ))
+                        else None
+                    )
+                ) == "fisica"
+            ]
+            st.session_state.setdefault("mass_phase", 1)
+            st.session_state["mass_selected_records"] = [
+                option
+                for option in st.session_state.get("mass_selected_records", [])
+                if option in bulk_records
+            ]
+            selected_keys = st.multiselect(
+                "Fase 1 — Seleziona le anagrafiche",
+                list(bulk_records),
+                format_func=lambda option: (
+                    f"{core.CUSTOMER_TYPES[bulk_records[option][0]]} — "
+                    f"{core.record_label(bulk_records[option][0], bulk_records[option][1])}"
+                ),
+                key="mass_selected_records",
+                disabled=st.session_state["mass_phase"] == 2,
+            )
+
+            if st.session_state["mass_phase"] == 1:
+                corporate_roles = {}
+                for role, keys in mass_templates.get("giuridica", {}).get(
+                    "placeholders", {}
+                ).items():
+                    suffix = core.split_role(role)[1]
+                    if suffix:
+                        corporate_roles.setdefault(suffix, []).extend(keys)
+                roles_to_select = ["LR", "TE1"] + [
+                    role for role in corporate_roles
+                    if role not in {"LR", "TE1"}
+                ]
+                selected_corporates = [
+                    (option, bulk_records[option][1])
+                    for option in selected_keys
+                    if bulk_records[option][0] == "giuridica"
+                ]
+                for option, company in selected_corporates:
+                    company_name = core.record_label("giuridica", company)
+                    with st.expander(
+                        f"Legale rappresentante e titolari effettivi — {company_name}",
+                        expanded=True,
+                    ):
+                        for role in roles_to_select:
+                            role_label = core.role_label(role)
+                            selection_key = f"mass_person_{core._norm(option)}_{role}"
+                            person_index = st.selectbox(
+                                role_label,
+                                list(range(len(people))),
+                                index=None,
+                                placeholder="Seleziona una persona...",
+                                format_func=lambda index: core.record_label(
+                                    "fisica", people[index]
+                                ),
+                                key=selection_key,
+                            )
+                            role_value = st.selectbox(
+                                "Carica / ruolo",
+                                [""] + core.CARICHE,
+                                key=f"mass_role_{core._norm(option)}_{role}",
+                            )
+                            if role_value == "Altro":
+                                role_value = st.text_input(
+                                    "Specifica il ruolo",
+                                    key=f"mass_role_other_{core._norm(option)}_{role}",
+                                )
+                            percentage = st.number_input(
+                                "Percentuale di titolarità",
+                                min_value=0.0,
+                                max_value=100.0,
+                                step=0.01,
+                                format="%.2f",
+                                key=f"mass_percentage_{core._norm(option)}_{role}",
+                                disabled=role == "LR",
+                            )
+
+                if st.button(
+                    "Conferma anagrafiche e passa alla fase 2",
+                    type="primary",
+                    disabled=not selected_keys,
+                    key="mass_to_phase2",
+                ):
+                    errors = []
+                    mandates = []
+                    for option in selected_keys:
+                        customer_type, record = bulk_records[option]
+                        mandate = {
+                            "customer_type": customer_type,
+                            "record": record,
+                            "roles": {},
+                        }
+                        if customer_type == "giuridica":
+                            for role in roles_to_select:
+                                widget_suffix = f"{core._norm(option)}_{role}"
+                                person_index = st.session_state.get(
+                                    f"mass_person_{widget_suffix}"
+                                )
+                                role_value = st.session_state.get(
+                                    f"mass_role_{widget_suffix}", ""
+                                )
+                                if role_value == "Altro":
+                                    role_value = st.session_state.get(
+                                        f"mass_role_other_{widget_suffix}", ""
+                                    )
+                                if person_index is None:
+                                    errors.append(
+                                        f"{core.record_label(customer_type, record)}: "
+                                        f"seleziona {core.role_label(role).lower()}."
+                                    )
+                                    continue
+                                if not role_value.strip():
+                                    errors.append(
+                                        f"{core.record_label(customer_type, record)}: "
+                                        f"inserisci il ruolo per {core.role_label(role).lower()}."
+                                    )
+                                mandate["roles"][role] = {
+                                    "person": people[person_index],
+                                    "role": role_value.strip(),
+                                    "percentage": str(
+                                        st.session_state.get(
+                                            f"mass_percentage_{widget_suffix}", 0
+                                        )
+                                    ),
+                                }
+                        mandates.append(mandate)
+                    if errors:
+                        st.error(" ".join(errors))
+                    else:
+                        st.session_state["mass_mandates"] = mandates
+                        st.session_state["mass_phase"] = 2
+                        st.session_state.pop("mass_archive", None)
+                        st.rerun()
+            else:
+                mandates = st.session_state.get("mass_mandates", [])
+                if not mandates:
+                    st.session_state["mass_phase"] = 1
+                    st.rerun()
+                st.info(
+                    "Fase 2 — Inserisci le variabili specifiche per ciascun mandato. "
+                    "I dati anagrafici e gli incarichi vengono precompilati dalla fase 1."
+                )
+                mass_values_by_mandate = []
+                invalid_bulk_fields = False
+                for number, mandate in enumerate(mandates, 1):
+                    customer_type = mandate["customer_type"]
+                    record = mandate["record"]
+                    template = mass_templates.get(customer_type)
+                    if not template:
+                        st.error(
+                            f"Manca il modello {core.CUSTOMER_TYPES[customer_type].lower()} "
+                            "per una delle anagrafiche selezionate."
+                        )
+                        invalid_bulk_fields = True
+                        continue
+                    placeholders = template["placeholders"]
+                    label = core.record_label(customer_type, record)
+                    values = {}
+                    manual_keys = []
+                    for key in placeholders:
+                        base, role = core.split_role(key)
+                        normalized_base = core._norm(base).upper()
+                        if role:
+                            role_data = mandate["roles"].get(role, {})
+                            if normalized_base in {"CARICA", "RUOLO", "RUOLO_SOCIETARIO"}:
+                                values[key] = role_data.get("role", "")
+                            elif "PERCENT" in normalized_base:
+                                values[key] = role_data.get("percentage", "")
+                            elif core.is_anagraphic_field(key):
+                                person = role_data.get("person", {})
+                                column = core.guess_column(base, person.keys(), "fisica")
+                                values[key] = core.format_field_value(
+                                    base, person.get(column) if column else None
+                                )
+                            else:
+                                manual_keys.append(key)
+                        elif core.is_anagraphic_field(key):
+                            if normalized_base == "FORMA_GIURIDICA":
+                                company_name_column = core.guess_column(
+                                    "RAGIONE_SOCIALE", record.keys(), "giuridica"
+                                )
+                                value = core.legal_form_from_company_name(
+                                    record.get(company_name_column)
+                                    if company_name_column else None
+                                )
+                            else:
+                                column = core.guess_column(
+                                    base, record.keys(), customer_type
+                                )
+                                value = core.format_field_value(
+                                    base, record.get(column) if column else None
+                                )
+                            values[key] = value
+                        else:
+                            manual_keys.append(key)
+
+                    with st.expander(
+                        f"Mandato {number} — {label}",
+                        expanded=len(mandates) == 1,
+                    ):
+                        if manual_keys:
+                            st.markdown("**Premessa, commissioni e altre variabili**")
+                            for key in manual_keys:
+                                field_label = key.replace("_", " ").capitalize()
+                                widget_key = (
+                                    f"mass_value_{core._norm(core.record_identity(record))}_"
+                                    f"{core._norm(key)}"
+                                )
+                                raw_value = _render_field_widget(
+                                    key,
+                                    field_label,
+                                    "",
+                                    widget_key,
+                                    multiline="PREMESSA" in core._norm(key).upper()
+                                    or key not in core.PREDEFINED,
+                                )
+                                try:
+                                    values[key] = core.format_field_value(
+                                        key,
+                                        core.format_commission_value(key, raw_value),
+                                    )
+                                except ValueError as error:
+                                    invalid_bulk_fields = True
+                                    st.error(f"{field_label}: {error}")
+                        else:
+                            st.caption("Il modello non contiene variabili manuali.")
+                    mass_values_by_mandate.append(
+                        (mandate, template, placeholders, values, label)
+                    )
+                mass_signature = json.dumps(
+                    [
+                        (
+                            mandate["customer_type"],
+                            core.record_identity(mandate["record"]),
+                            hashlib.sha256(template["docx"]).hexdigest(),
+                            template["format"],
+                            values,
+                        )
+                        for mandate, template, _, values, _ in mass_values_by_mandate
+                    ],
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
+
+                back_col, generate_col = st.columns([1, 3])
+                if back_col.button("Torna alla fase 1", key="mass_back_to_phase1"):
+                    st.session_state["mass_phase"] = 1
+                    st.rerun()
+                if generate_col.button(
+                    "Genera i mandati",
+                    type="primary",
+                    disabled=invalid_bulk_fields or not mass_values_by_mandate,
+                    key="mass_generate",
+                ):
+                    documents = []
+                    used_names = set()
+                    with st.spinner("Generazione dei documenti..."):
+                        for mandate, template, placeholders, values, label in mass_values_by_mandate:
+                            fields = [
+                                {"name": key, "tokens": tokens}
+                                for key, tokens in placeholders.items()
+                            ]
+                            output = core.render(template["docx"], fields, values)
+                            extension = template["format"]
+                            if extension == "doc":
+                                output = core.convert(output, "docx", "doc")
+                            filename_base = core._norm(label).replace("_", " ") or "anagrafica"
+                            filename = f"Mandato {filename_base}.{extension}"
+                            duplicate = 2
+                            while filename.casefold() in used_names:
+                                filename = (
+                                    f"Mandato {filename_base} ({duplicate}).{extension}"
+                                )
+                                duplicate += 1
+                            used_names.add(filename.casefold())
+                            documents.append((filename, output))
+                    st.session_state["mass_archive"] = core.create_document_archive(
+                        documents
+                    )
+                    st.session_state["mass_archive_signature"] = mass_signature
+
+                if (
+                    st.session_state.get("mass_archive")
+                    and st.session_state.get("mass_archive_signature") == mass_signature
+                ):
+                    st.download_button(
+                        "Scarica i mandati separati (ZIP)",
+                        st.session_state["mass_archive"],
+                        file_name="Mandati_massivi.zip",
+                        mime="application/zip",
+                        key="mass_download",
+                    )
 
 with tab_archive:
     st.subheader("Archivio condiviso delle persone giuridiche")
