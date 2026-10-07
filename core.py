@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
 from docx import Document
@@ -865,6 +865,23 @@ def format_commission_value(name, value):
     whole, cents = divmod(cents_total, 100)
     formatted = f"{whole:,}".replace(",", ".") + f",{cents:02d}"
     return f"{formatted} ({_integer_words(whole)}/{cents:02d})"
+
+
+def format_percentage_value(value):
+    """Format a percentage as an Italian value with two decimal places."""
+    raw = str(value or "").strip().replace("%", "").replace(" ", "")
+    if not raw:
+        raise ValueError("inserisci una percentuale")
+    if "," in raw:
+        raw = raw.replace(".", "").replace(",", ".")
+    try:
+        percentage = Decimal(raw)
+    except InvalidOperation as error:
+        raise ValueError("inserisci una percentuale numerica") from error
+    if not percentage.is_finite() or not Decimal("0") <= percentage <= Decimal("100"):
+        raise ValueError("la percentuale deve essere compresa tra 0 e 100")
+    percentage = percentage.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"{percentage:.2f}".replace(".", ",") + "%"
 
 
 # Campi che non hanno senso per un tipo di cliente

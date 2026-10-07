@@ -18,6 +18,13 @@ class BulkGenerationTests(unittest.TestCase):
         self.assertEqual(core.role_label("LR2"), "Legale rappresentante 2")
         self.assertEqual(core.role_label("TE3"), "Titolare effettivo 3")
 
+    def test_formats_percentages_as_italian_values_with_two_decimals(self):
+        self.assertEqual(core.format_percentage_value("10"), "10,00%")
+        self.assertEqual(core.format_percentage_value("10,5"), "10,50%")
+        self.assertEqual(core.format_percentage_value("10.50%"), "10,50%")
+        with self.assertRaisesRegex(ValueError, "compresa tra 0 e 100"):
+            core.format_percentage_value("100,01")
+
     def test_creates_zip_with_individual_documents(self):
         content = core.create_document_archive(
             [("Mandato Mario Rossi.docx", b"persona fisica"),
