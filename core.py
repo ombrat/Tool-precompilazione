@@ -65,6 +65,14 @@ ARCHIVE_DEFAULT_DATABASE = Table(
     Column("content", LargeBinary, nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
+ARCHIVE_PREMISES = Table(
+    "archive_premises",
+    ARCHIVE_METADATA,
+    Column("id", String(36), primary_key=True),
+    Column("name", Text, nullable=False),
+    Column("content", Text, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
 
 DEFAULT_SETTINGS = {
     "xls_path": str(BASE / "Database.XLS"),
@@ -452,6 +460,60 @@ def delete_archive_profile(database_url, profile_id):
         )
     if result.rowcount != 1:
         raise KeyError("La scheda da eliminare non esiste più.")
+
+
+def list_archive_premises(database_url):
+    engine = _archive_table(database_url)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(
+                ARCHIVE_PREMISES.c.id,
+                ARCHIVE_PREMISES.c.name,
+                ARCHIVE_PREMISES.c.content,
+                ARCHIVE_PREMISES.c.updated_at,
+            ).order_by(ARCHIVE_PREMISES.c.name)
+        )
+        return [
+            {
+                "id": row.id,
+                "name": row.name,
+                "content": row.content,
+                "updated_at": row.updated_at,
+            }
+            for row in rows
+        ]
+
+
+def save_archive_premise(database_url, name, content):
+    name = str(name).strip()
+    content = str(content).strip()
+    if not name:
+        raise ValueError("Inserisci un titolo per la premessa.")
+    if not content:
+        raise ValueError("Inserisci il testo della premessa.")
+
+    premise_id = str(uuid.uuid4())
+    engine = _archive_table(database_url)
+    with engine.begin() as connection:
+        connection.execute(
+            insert(ARCHIVE_PREMISES).values(
+                id=premise_id,
+                name=name,
+                content=content,
+                updated_at=func.now(),
+            )
+        )
+    return premise_id
+
+
+def delete_archive_premise(database_url, premise_id):
+    engine = _archive_table(database_url)
+    with engine.begin() as connection:
+        result = connection.execute(
+            ARCHIVE_PREMISES.delete().where(ARCHIVE_PREMISES.c.id == premise_id)
+        )
+    if result.rowcount != 1:
+        raise KeyError("La premessa da eliminare non esiste più.")
 
 
 # ---------- conversione .doc <-> .docx ----------

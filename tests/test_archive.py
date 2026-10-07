@@ -135,6 +135,27 @@ class ArchiveProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "file Excel valido"):
             core.save_default_database(self.database_url, "vuoto.xls", b"")
 
+    def test_create_list_and_delete_archived_premises(self):
+        premise_text = "Il cliente conferisce mandato per la consulenza richiesta."
+        premise_id = core.save_archive_premise(
+            self.database_url, "Consulenza ordinaria", premise_text
+        )
+
+        premises = core.list_archive_premises(self.database_url)
+        self.assertEqual(len(premises), 1)
+        self.assertEqual(premises[0]["id"], premise_id)
+        self.assertEqual(premises[0]["name"], "Consulenza ordinaria")
+        self.assertEqual(premises[0]["content"], premise_text)
+
+        core.delete_archive_premise(self.database_url, premise_id)
+        self.assertEqual(core.list_archive_premises(self.database_url), [])
+
+    def test_rejects_empty_archived_premise_fields(self):
+        with self.assertRaisesRegex(ValueError, "titolo"):
+            core.save_archive_premise(self.database_url, " ", "Testo")
+        with self.assertRaisesRegex(ValueError, "testo"):
+            core.save_archive_premise(self.database_url, "Titolo", " ")
+
     def test_rejects_duplicate_owners_and_out_of_range_percentages(self):
         duplicate_payload = {
             **self.payload,

@@ -181,6 +181,92 @@ def _render_field_widget(name, label, initial, widget_key, multiline=False):
         return st.text_input(label, value=initial, key=widget_key)
 
 
+def _apply_archived_premise(select_key, target_key, premises_by_id):
+    premise = premises_by_id.get(st.session_state.get(select_key))
+    if premise:
+        st.session_state[target_key] = premise["content"]
+
+
+def _render_premise_widget(
+    name, label, initial, widget_key, premises_by_id, in_form=False
+):
+    select_key = f"{widget_key}_archived_premise"
+    if archive_database_url and not premises_error:
+        premise_ids = [None] + list(premises_by_id)
+        st.selectbox(
+            "Scegli una premessa salvata",
+            premise_ids,
+            format_func=lambda premise_id: (
+                "Seleziona una premessa"
+                if premise_id is None
+                else premises_by_id[premise_id]["name"]
+            ),
+            key=select_key,
+            on_change=None if in_form else _apply_archived_premise,
+            args=(select_key, widget_key, premises_by_id),
+        )
+        if in_form:
+            st.form_submit_button(
+                "Carica premessa selezionata",
+                key=f"{widget_key}_apply_archived_premise",
+                disabled=len(premise_ids) < 2,
+                on_click=_apply_archived_premise,
+                args=(select_key, widget_key, premises_by_id),
+            )
+    elif premises_error:
+        st.caption(f"Archivio delle premesse non disponibile: {premises_error}")
+    elif not archive_database_url:
+        st.caption("Configura ARCHIVE_DATABASE_URL per caricare o salvare premesse.")
+
+    value = _render_field_widget(name, label, initial, widget_key, multiline=True)
+    save_label = "💾 Salva premessa"
+    if in_form:
+        save_clicked = st.form_submit_button(
+            save_label,
+            key=f"{widget_key}_save_archived_premise",
+            disabled=not archive_database_url or bool(premises_error),
+        )
+    else:
+        save_clicked = st.button(
+            save_label,
+            key=f"{widget_key}_save_archived_premise",
+            disabled=not archive_database_url or bool(premises_error),
+        )
+    return value, save_clicked
+
+
+@st.dialog("Salva premessa nell'archivio")
+def _save_premise_dialog(premise_text):
+    st.text_area(
+        "Testo della premessa",
+        value=premise_text,
+        height=180,
+        key="premise_dialog_content",
+    )
+    st.text_input("Titolo", key="premise_dialog_title")
+    if st.button("Salva", type="primary", key="premise_dialog_save"):
+        try:
+            core.save_archive_premise(
+                archive_database_url,
+                st.session_state.get("premise_dialog_title", ""),
+                st.session_state.get("premise_dialog_content", ""),
+            )
+        except (KeyError, ValueError) as error:
+            st.error(str(error))
+        except Exception as error:
+            st.error(f"Impossibile salvare la premessa: {error}")
+        else:
+            invalidate_session_premises_cache()
+            st.session_state["premise_archive_notice"] = "Premessa salvata nell'archivio."
+            st.rerun()
+
+
+def _open_premise_save_dialog(premise_text):
+    st.session_state.pop("premise_dialog_content", None)
+    st.session_state.pop("premise_dialog_title", None)
+    _save_premise_dialog(premise_text)
+
+
 def _render_document_field(key, record, mapping, record_id):
     label = key.replace("_", " ").capitalize()
     col = mapping.get(key)
@@ -193,9 +279,17 @@ def _render_document_field(key, record, mapping, record_id):
     else:
         initial = core.format_field_value(key, record.get(col) if col else None)
     widget_key = f"v_{record_id}_{key}{_field_widget_revision(key)}"
-    raw_value = _render_field_widget(
-        key, label, initial, widget_key, multiline=core._norm(key).upper() not in core.PREDEFINED
-    )
+    if "PREMESSA" in core._norm(key).upper():
+        raw_value, save_clicked = _render_premise_widget(
+            key, label, initial, widget_key, premise_by_id
+        )
+        if save_clicked:
+            _open_premise_save_dialog(raw_value)
+    else:
+        raw_value = _render_field_widget(
+            key, label, initial, widget_key,
+            multiline=core._norm(key).upper() not in core.PREDEFINED,
+        )
     try:
         return core.format_field_value(key, core.format_commission_value(key, raw_value)), False
     except ValueError as error:
@@ -236,6 +330,17 @@ def session_archive_profiles(database_url):
     return cached["profiles"]
 
 
+def session_archive_premises(database_url):
+    cached = st.session_state.get("archive_premises_cache")
+    if cached is None or cached["database_url"] != database_url:
+        cached = {
+            "database_url": database_url,
+            "premises": core.list_archive_premises(database_url),
+        }
+        st.session_state["archive_premises_cache"] = cached
+    return cached["premises"]
+
+
 def session_default_database_info(database_url):
     cached = st.session_state.get("default_database_info_cache")
     if cached is None or cached["database_url"] != database_url:
@@ -253,6 +358,10 @@ def invalidate_session_default_database_cache():
 
 def invalidate_session_profiles_cache():
     st.session_state.pop("archive_profiles_cache", None)
+
+
+def invalidate_session_premises_cache():
+    st.session_state.pop("archive_premises_cache", None)
 
 
 def _normalize_percentage_widgets(widget_keys, error_key):
@@ -351,6 +460,14 @@ if archive_database_url:
     except Exception as error:
         archive_error = str(error)
 
+archive_premises, premises_error = [], None
+if archive_database_url:
+    try:
+        archive_premises = session_archive_premises(archive_database_url)
+    except Exception as error:
+        premises_error = str(error)
+premise_by_id = {premise["id"]: premise for premise in archive_premises}
+
 default_database_info, default_database_error = None, None
 if archive_database_url and not archive_error:
     try:
@@ -381,9 +498,12 @@ active_xls_content = st.session_state.get("uploaded_xls") or st.session_state.ge
 )
 
 profile_by_id = {profile["id"]: profile for profile in archive_profiles}
-tab_main, tab_bulk, tab_archive, tab_db = st.tabs(
-    ["Documento singolo", "Generazione massiva", "Archivio", "Database"]
+tab_main, tab_bulk, tab_archive, tab_premises, tab_db = st.tabs(
+    ["Documento singolo", "Generazione massiva", "Archivio", "Premesse", "Database"]
 )
+
+if notice := st.session_state.pop("premise_archive_notice", None):
+    st.success(notice)
 
 with tab_main:
     selected_archive_for_type = profile_by_id.get(
@@ -607,8 +727,16 @@ with tab_main:
                             col = core.guess_column(base, person_columns, "fisica")
                             init = core.format_field_value(base, person.get(col) if col else None)
                             k = f"v_{rid}_{key}_{person.get('id', '')}{key_revision}"
+                        if "PREMESSA" in core._norm(base).upper():
+                            raw_value, save_clicked = _render_premise_widget(
+                                base, label, init, k, premise_by_id
+                            )
+                            if save_clicked:
+                                _open_premise_save_dialog(raw_value)
+                        else:
+                            raw_value = _render_field_widget(base, label, init, k)
                         values[key] = core.format_field_value(
-                            base, _render_field_widget(base, label, init, k)
+                            base, raw_value
                         )
                     role_data[role] = {"person": person, "carica": carica, "keys": keys}
                     visible_role_keys = [
@@ -1321,6 +1449,7 @@ with tab_bulk:
                 )
                 generate_clicked = False
                 back_to_roles = False
+                premise_save_request = None
                 mass_left, mass_right = st.columns([2, 3], gap="large")
                 with mass_left:
                     with st.form("mass_values_form"):
@@ -1341,14 +1470,25 @@ with tab_bulk:
                                         widget_key = (
                                             f"mass_value_{record_key}_{core._norm(key)}"
                                         )
-                                        raw_value = _render_field_widget(
-                                            key,
-                                            field_label,
-                                            saved_manual_values.get(widget_key, ""),
-                                            widget_key,
-                                            multiline="PREMESSA" in core._norm(key).upper()
-                                            or key not in core.PREDEFINED,
-                                        )
+                                        if "PREMESSA" in core._norm(key).upper():
+                                            raw_value, save_clicked = _render_premise_widget(
+                                                key,
+                                                field_label,
+                                                saved_manual_values.get(widget_key, ""),
+                                                widget_key,
+                                                premise_by_id,
+                                                in_form=True,
+                                            )
+                                            if save_clicked:
+                                                premise_save_request = raw_value
+                                        else:
+                                            raw_value = _render_field_widget(
+                                                key,
+                                                field_label,
+                                                saved_manual_values.get(widget_key, ""),
+                                                widget_key,
+                                                multiline=key not in core.PREDEFINED,
+                                            )
                                         try:
                                             values[key] = core.format_field_value(
                                                 key,
@@ -1370,6 +1510,9 @@ with tab_bulk:
                             type="primary",
                             disabled=invalid_bulk_fields or not mass_values_by_mandate,
                         )
+
+                if premise_save_request is not None:
+                    _open_premise_save_dialog(premise_save_request)
 
                 if back_to_roles:
                     st.session_state["mass_phase"] = 2
@@ -1686,6 +1829,50 @@ with tab_archive:
                     else:
                         invalidate_session_profiles_cache()
                         st.session_state["archive_notice"] = "Scheda eliminata."
+                        st.rerun()
+
+with tab_premises:
+    st.subheader("Archivio condiviso delle premesse")
+    st.caption(
+        "Le premesse salvate qui sono disponibili nei campi omonimi del documento "
+        "singolo e della generazione massiva."
+    )
+    if not archive_database_url:
+        st.error(
+            "Archivio non configurato. Aggiungi ARCHIVE_DATABASE_URL ai Secrets "
+            "dell'app Streamlit."
+        )
+    elif premises_error:
+        st.error(f"Impossibile caricare l'archivio delle premesse: {premises_error}")
+    elif not archive_premises:
+        st.info(
+            "Non ci sono ancora premesse archiviate. Puoi salvarne una direttamente "
+            "dal campo Premessa durante la compilazione."
+        )
+    else:
+        for premise in archive_premises:
+            with st.expander(premise["name"]):
+                st.text_area(
+                    "Testo della premessa",
+                    value=premise["content"],
+                    height=160,
+                    disabled=True,
+                    key=f"archived_premise_content_{premise['id']}",
+                )
+                if st.button(
+                    "Elimina premessa",
+                    key=f"delete_archived_premise_{premise['id']}",
+                ):
+                    try:
+                        core.delete_archive_premise(
+                            archive_database_url, premise["id"]
+                        )
+                    except (KeyError, ValueError) as error:
+                        st.error(str(error))
+                    except Exception as error:
+                        st.error(f"Impossibile eliminare la premessa: {error}")
+                    else:
+                        invalidate_session_premises_cache()
                         st.rerun()
 
 with tab_db:
