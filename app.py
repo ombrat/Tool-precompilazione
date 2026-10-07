@@ -326,6 +326,24 @@ def _find_record_index(snapshot, records):
     )
 
 
+def _document_archive_roles(role_data, values):
+    archive_roles = {}
+    for role, info in role_data.items():
+        percentage_key = next(
+            (
+                key for key in info["keys"]
+                if "PERCENT" in core._norm(core.split_role(key)[0]).upper()
+            ),
+            None,
+        )
+        archive_roles[role] = {
+            "person": info["person"],
+            "role": info["carica"] or "",
+            "percentage": values.get(percentage_key, "") if percentage_key else "",
+        }
+    return archive_roles
+
+
 archive_profiles, archive_error = [], None
 if archive_database_url:
     try:
@@ -541,6 +559,18 @@ with tab_main:
                         if role == "LR":
                             person = payload["legal_representative"]
                             carica = payload.get("representative_role", "")
+                        elif role.startswith("LR") and role[2:].isdigit():
+                            representatives = payload.get(
+                                "additional_legal_representatives", []
+                            )
+                            representative_index = int(role[2:]) - 2
+                            representative = (
+                                representatives[representative_index]
+                                if representative_index < len(representatives)
+                                else None
+                            )
+                            person = representative.get("person", {}) if representative else {}
+                            carica = representative.get("role", "") if representative else ""
                         elif role.startswith("TE"):
                             owner_index = int(role[2:]) - 1 if role[2:].isdigit() else 0
                             owners = payload.get("owners", [])
@@ -612,33 +642,38 @@ with tab_main:
             if not placeholders:
                 st.warning("Nessun segnaposto trovato (es. [NOME], [COGNOME]).")
 
-            if archive_database_url and not archive_error and not selected_archive and rec and "LR" in role_data:
+            matching_archive_profile = (
+                next(
+                    (
+                        profile for profile in archive_profiles
+                        if core.record_identity(profile["payload"]["company"])
+                        == core.record_identity(rec)
+                    ),
+                    None,
+                )
+                if ctype == "giuridica" and rec else None
+            )
+            if (
+                archive_database_url
+                and not archive_error
+                and not selected_archive
+                and not matching_archive_profile
+                and ctype == "giuridica"
+                and rec
+                and "LR" in role_data
+            ):
                 with st.expander("Salva questa anagrafica nell'archivio"):
-                    owners_to_save = []
-                    for role, info in role_data.items():
-                        if not role.startswith("TE") or not info["person"]:
-                            continue
-                        pct_key = next(
-                            (k for k in info["keys"] if "PERCENT" in core._norm(core.split_role(k)[0]).upper()),
-                            None,
-                        )
-                        owners_to_save.append({
-                            "person": info["person"],
-                            "percentage": str(values.get(pct_key, "")).replace("%", "").replace(",", ".").strip() if pct_key else "",
-                        })
                     default_name = core.record_label(ctype, rec)
                     save_name = st.text_input("Nome della scheda", value=default_name, key=f"doc_save_name_{rid}")
                     if st.button("Salva anagrafica", key="doc_save_profile"):
                         try:
+                            payload = core.archive_payload_from_mass_roles(
+                                rec, _document_archive_roles(role_data, values)
+                            )
                             core.save_archive_profile(
                                 archive_database_url,
                                 save_name,
-                                {
-                                    "company": rec,
-                                    "legal_representative": role_data["LR"]["person"],
-                                    "representative_role": role_data["LR"]["carica"] or "",
-                                    "owners": owners_to_save,
-                                },
+                                payload,
                             )
                         except (KeyError, ValueError) as error:
                             st.error(str(error))
@@ -653,6 +688,43 @@ with tab_main:
                 with st.spinner("Generazione..."):
                     out = core.render(data, fields, values)
                     st.session_state["out"] = core.convert(out, "docx", "doc") if fmt == "doc" else out
+                if (
+                    ctype == "giuridica"
+                    and rec
+                    and not selected_archive
+                    and not matching_archive_profile
+                ):
+                    if not archive_database_url:
+                        st.warning(
+                            "Documento generato, ma la scheda non è stata salvata: "
+                            "l'archivio non è configurato."
+                        )
+                    elif archive_error:
+                        st.warning(
+                            "Documento generato, ma non è stato possibile verificare "
+                            f"l'archivio: {archive_error}"
+                        )
+                    else:
+                        try:
+                            payload = core.archive_payload_from_mass_roles(
+                                rec, _document_archive_roles(role_data, values)
+                            )
+                            core.save_archive_profile(
+                                archive_database_url,
+                                core.record_label(ctype, rec),
+                                payload,
+                            )
+                        except Exception as error:
+                            st.error(
+                                "Documento generato, ma impossibile salvare "
+                                f"automaticamente la scheda: {error}"
+                            )
+                        else:
+                            invalidate_session_profiles_cache()
+                            st.success(
+                                "Scheda della persona giuridica salvata "
+                                "automaticamente nell'archivio."
+                            )
             if st.session_state.get("out"):
                 st.download_button(
                     "Scarica documento compilato", st.session_state["out"],
@@ -805,8 +877,21 @@ with tab_bulk:
                             )
                             payload = profile["payload"] if profile else {}
                             saved_owners = payload.get("owners", [])
+                            saved_representatives = []
+                            representative = payload.get("legal_representative")
+                            if representative:
+                                saved_representatives.append(
+                                    {
+                                        "person": representative,
+                                        "role": payload.get("representative_role", ""),
+                                    }
+                                )
+                            saved_representatives.extend(
+                                payload.get("additional_legal_representatives", [])
+                            )
                             st.session_state.setdefault(
-                                f"mass_lr_count_{company_key}", 1
+                                f"mass_lr_count_{company_key}",
+                                max(1, len(saved_representatives)),
                             )
                             st.session_state.setdefault(
                                 f"mass_te_count_{company_key}",
@@ -815,11 +900,13 @@ with tab_bulk:
                             if option in st.session_state["mass_role_data"]:
                                 continue
                             role_data = {}
-                            representative = payload.get("legal_representative")
-                            if representative:
-                                role_data["LR"] = {
-                                    "person": representative,
-                                    "role": payload.get("representative_role", ""),
+                            for number, saved_representative in enumerate(
+                                saved_representatives, 1
+                            ):
+                                role = "LR" if number == 1 else f"LR{number}"
+                                role_data[role] = {
+                                    "person": saved_representative.get("person", {}),
+                                    "role": saved_representative.get("role", ""),
                                     "percentage": "",
                                 }
                             for number, owner in enumerate(saved_owners, 1):
@@ -1080,6 +1167,72 @@ with tab_bulk:
                     if errors:
                         st.error(" ".join(errors))
                     else:
+                        saved_profiles = []
+                        archive_save_errors = []
+                        if archive_database_url and not archive_error:
+                            profile_by_identity = {
+                                core.record_identity(profile["payload"]["company"]): profile
+                                for profile in archive_profiles
+                            }
+                            auto_saved_profiles = st.session_state.setdefault(
+                                "mass_auto_saved_profile_ids", {}
+                            )
+                            for mandate in mandates:
+                                if mandate["customer_type"] != "giuridica":
+                                    continue
+                                record = mandate["record"]
+                                company_identity = core.record_identity(record)
+                                profile_id = auto_saved_profiles.get(company_identity)
+                                if (
+                                    company_identity in profile_by_identity
+                                    and not profile_id
+                                ):
+                                    continue
+                                company_name = core.record_label("giuridica", record)
+                                try:
+                                    payload = core.archive_payload_from_mass_roles(
+                                        record, mandate["roles"]
+                                    )
+                                    profile_id = core.save_archive_profile(
+                                        archive_database_url,
+                                        company_name,
+                                        payload,
+                                        profile_id=profile_id,
+                                    )
+                                except Exception as error:
+                                    archive_save_errors.append(
+                                        f"{company_name}: {error}"
+                                    )
+                                else:
+                                    auto_saved_profiles[company_identity] = profile_id
+                                    saved_profiles.append(company_name)
+                                    profile_by_identity[company_identity] = {
+                                        "id": profile_id,
+                                        "payload": payload,
+                                    }
+                        elif archive_database_url and archive_error:
+                            archive_save_errors.append(
+                                "Impossibile verificare le schede già presenti: "
+                                f"{archive_error}"
+                            )
+                        elif any(
+                            mandate["customer_type"] == "giuridica"
+                            for mandate in mandates
+                        ):
+                            archive_save_errors.append(
+                                "Archivio non configurato: le schede delle persone "
+                                "giuridiche non possono essere salvate."
+                            )
+                        if saved_profiles:
+                            invalidate_session_profiles_cache()
+                        st.session_state["mass_archive_save_notice"] = (
+                            "Schede salvate automaticamente nell'archivio: "
+                            + ", ".join(saved_profiles)
+                            if saved_profiles else ""
+                        )
+                        st.session_state["mass_archive_save_errors"] = (
+                            archive_save_errors
+                        )
                         st.session_state["mass_mandates"] = mandates
                         st.session_state["mass_phase"] = 3
                         st.session_state.pop("mass_archive", None)
@@ -1093,6 +1246,10 @@ with tab_bulk:
                     "Fase 2 — Inserisci le variabili specifiche per ciascun mandato. "
                     "I dati anagrafici e gli incarichi vengono precompilati dalla fase 1."
                 )
+                if notice := st.session_state.pop("mass_archive_save_notice", ""):
+                    st.success(notice)
+                for error in st.session_state.pop("mass_archive_save_errors", []):
+                    st.error(f"Salvataggio automatico nell'archivio non riuscito: {error}")
                 mass_values_by_mandate = []
                 invalid_bulk_fields = False
                 for number, mandate in enumerate(mandates, 1):
@@ -1436,6 +1593,12 @@ with tab_archive:
                         "company": company,
                         "legal_representative": representative,
                         "representative_role": representative_role.strip(),
+                        "additional_legal_representatives": (
+                            saved_profile["payload"].get(
+                                "additional_legal_representatives", []
+                            )
+                            if saved_profile else []
+                        ),
                         "owners": owners,
                     }
                     try:

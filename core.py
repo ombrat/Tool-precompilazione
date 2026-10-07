@@ -334,6 +334,63 @@ def list_archive_profiles(database_url):
         ]
 
 
+def archive_payload_from_mass_roles(company, roles):
+    legal_representatives = sorted(
+        (
+            (role, data)
+            for role, data in roles.items()
+            if role == "LR" or (role.startswith("LR") and role[2:].isdigit())
+        ),
+        key=lambda item: 1 if item[0] == "LR" else int(item[0][2:]),
+    )
+    owners = sorted(
+        (
+            (role, data)
+            for role, data in roles.items()
+            if role.startswith("TE") and role[2:].isdigit()
+        ),
+        key=lambda item: int(item[0][2:]),
+    )
+    if not legal_representatives or not owners:
+        raise ValueError(
+            "Per archiviare la scheda servono un legale rappresentante "
+            "e almeno un titolare effettivo."
+        )
+
+    representative_payloads = []
+    for role, data in legal_representatives:
+        person = data.get("person")
+        representative_role = str(data.get("role", "")).strip()
+        if not isinstance(person, dict) or not person or not representative_role:
+            raise ValueError(
+                f"Completa persona e carica per {role_label(role).lower()}."
+            )
+        representative_payloads.append(
+            {"person": person, "role": representative_role}
+        )
+
+    owner_payloads = []
+    for role, data in owners:
+        person = data.get("person")
+        if not isinstance(person, dict) or not person:
+            raise ValueError(f"Seleziona {role_label(role).lower()}.")
+        percentage = format_percentage_value(data.get("percentage", ""))
+        owner_payloads.append(
+            {
+                "person": person,
+                "percentage": percentage.removesuffix("%").replace(",", "."),
+            }
+        )
+
+    return {
+        "company": company,
+        "legal_representative": representative_payloads[0]["person"],
+        "representative_role": representative_payloads[0]["role"],
+        "additional_legal_representatives": representative_payloads[1:],
+        "owners": owner_payloads,
+    }
+
+
 def save_archive_profile(database_url, name, payload, profile_id=None):
     name = str(name).strip()
     if not name:

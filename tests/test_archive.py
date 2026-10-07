@@ -61,6 +61,52 @@ class ArchiveProfileTests(unittest.TestCase):
         core.delete_archive_profile(self.database_url, profile_id)
         self.assertEqual(core.list_archive_profiles(self.database_url), [])
 
+    def test_builds_archive_payload_from_mass_role_selections(self):
+        roles = {
+            "LR": {
+                "person": self.payload["legal_representative"],
+                "role": "Amministratore unico",
+            },
+            "LR2": {
+                "person": {"Codice Fiscale": "VRDLRA90A01H501Y", "Cognome": "Verdi"},
+                "role": "Presidente",
+            },
+            "TE1": {
+                "person": self.payload["owners"][0]["person"],
+                "percentage": "55,50%",
+            },
+        }
+
+        payload = core.archive_payload_from_mass_roles(
+            self.payload["company"], roles
+        )
+
+        self.assertEqual(
+            payload["legal_representative"],
+            self.payload["legal_representative"],
+        )
+        self.assertEqual(
+            payload["representative_role"], "Amministratore unico"
+        )
+        self.assertEqual(
+            payload["additional_legal_representatives"],
+            [{"person": roles["LR2"]["person"], "role": "Presidente"}],
+        )
+        self.assertEqual(
+            payload["owners"],
+            [{"person": roles["TE1"]["person"], "percentage": "55.50"}],
+        )
+        profile_id = core.save_archive_profile(
+            self.database_url, "Società Uno", payload
+        )
+        stored_profile = core.list_archive_profiles(self.database_url)[0]
+        stored_payload = stored_profile["payload"]
+        self.assertEqual(stored_profile["id"], profile_id)
+        self.assertEqual(
+            stored_payload["additional_legal_representatives"],
+            payload["additional_legal_representatives"],
+        )
+
     def test_create_and_update_shared_database(self):
         original = b"original xls content"
         digest = core.save_default_database(
