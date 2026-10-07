@@ -1332,7 +1332,7 @@ with tab_bulk:
                             )
                             with st.expander(
                                 f"Mandato — {label}",
-                                expanded=len(mandates) == 1,
+                                expanded=True,
                             ):
                                 if manual_keys:
                                     st.markdown("**Premessa, commissioni e altre variabili**")
@@ -1417,7 +1417,37 @@ with tab_bulk:
                                 ):
                                     st.image(image, width="stretch")
                 with mass_left:
-                    if generate_clicked and not invalid_bulk_fields:
+                    missing_required = []
+                    for _, _, _, values, label, manual_keys in mass_values_by_mandate:
+                        premessa_keys = [
+                            key for key in manual_keys
+                            if "PREMESSA" in core._norm(key).upper()
+                        ]
+                        commission_keys = [
+                            key for key in manual_keys
+                            if core._norm(key).upper() in core._COMMISSION_FIELDS
+                        ]
+                        missing = []
+                        if premessa_keys and not any(
+                            str(values.get(key, "")).strip() for key in premessa_keys
+                        ):
+                            missing.append("premessa")
+                        if commission_keys and not any(
+                            str(values.get(key, "")).strip() for key in commission_keys
+                        ):
+                            missing.append("almeno una commissione")
+                        if missing:
+                            missing_required.append(f"{label}: {' e '.join(missing)}")
+                    if generate_clicked and missing_required:
+                        st.error(
+                            "Generazione bloccata. Compila i campi obbligatori:\n\n"
+                            + "\n".join(f"- {item}" for item in missing_required)
+                        )
+                    if (
+                        generate_clicked
+                        and not invalid_bulk_fields
+                        and not missing_required
+                    ):
                         documents = []
                         used_names = set()
                         with st.spinner("Generazione dei documenti..."):
