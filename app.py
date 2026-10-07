@@ -1321,52 +1321,55 @@ with tab_bulk:
                 )
                 generate_clicked = False
                 back_to_roles = False
-                with st.form("mass_values_form"):
-                    for (
-                        mandate, template, placeholders, values, label, manual_keys
-                    ) in mass_values_by_mandate:
-                        record_key = core._norm(
-                            core.record_identity(mandate["record"])
-                        )
-                        with st.expander(
-                            f"Mandato — {label}",
-                            expanded=len(mandates) == 1,
-                        ):
-                            if manual_keys:
-                                st.markdown("**Premessa, commissioni e altre variabili**")
-                                for key in manual_keys:
-                                    field_label = key.replace("_", " ").capitalize()
-                                    widget_key = (
-                                        f"mass_value_{record_key}_{core._norm(key)}"
-                                    )
-                                    raw_value = _render_field_widget(
-                                        key,
-                                        field_label,
-                                        saved_manual_values.get(widget_key, ""),
-                                        widget_key,
-                                        multiline="PREMESSA" in core._norm(key).upper()
-                                        or key not in core.PREDEFINED,
-                                    )
-                                    try:
-                                        values[key] = core.format_field_value(
-                                            key,
-                                            core.format_commission_value(key, raw_value),
+                mass_left, mass_right = st.columns([2, 3], gap="large")
+                with mass_left:
+                    with st.form("mass_values_form"):
+                        for (
+                            mandate, template, placeholders, values, label, manual_keys
+                        ) in mass_values_by_mandate:
+                            record_key = core._norm(
+                                core.record_identity(mandate["record"])
+                            )
+                            with st.expander(
+                                f"Mandato — {label}",
+                                expanded=len(mandates) == 1,
+                            ):
+                                if manual_keys:
+                                    st.markdown("**Premessa, commissioni e altre variabili**")
+                                    for key in manual_keys:
+                                        field_label = key.replace("_", " ").capitalize()
+                                        widget_key = (
+                                            f"mass_value_{record_key}_{core._norm(key)}"
                                         )
-                                    except ValueError as error:
-                                        invalid_bulk_fields = True
-                                        st.error(f"{field_label}: {error}")
-                            else:
-                                st.caption("Il modello non contiene variabili manuali.")
-                    back_to_roles = st.form_submit_button(
-                        "Torna alla fase 1 — LR e TE",
-                        on_click=_save_mass_manual_values,
-                        args=(manual_widget_keys,),
-                    )
-                    generate_clicked = st.form_submit_button(
-                        "Genera i mandati",
-                        type="primary",
-                        disabled=invalid_bulk_fields or not mass_values_by_mandate,
-                    )
+                                        raw_value = _render_field_widget(
+                                            key,
+                                            field_label,
+                                            saved_manual_values.get(widget_key, ""),
+                                            widget_key,
+                                            multiline="PREMESSA" in core._norm(key).upper()
+                                            or key not in core.PREDEFINED,
+                                        )
+                                        try:
+                                            values[key] = core.format_field_value(
+                                                key,
+                                                core.format_commission_value(key, raw_value),
+                                            )
+                                        except ValueError as error:
+                                            invalid_bulk_fields = True
+                                            st.error(f"{field_label}: {error}")
+                                else:
+                                    st.caption("Il modello non contiene variabili manuali.")
+                        back_to_roles = st.form_submit_button(
+                            "Torna alla fase 1 — LR e TE",
+                            on_click=_save_mass_manual_values,
+                            args=(manual_widget_keys,),
+                        )
+                        st.form_submit_button("Aggiorna anteprima")
+                        generate_clicked = st.form_submit_button(
+                            "Genera i mandati",
+                            type="primary",
+                            disabled=invalid_bulk_fields or not mass_values_by_mandate,
+                        )
 
                 if back_to_roles:
                     st.session_state["mass_phase"] = 2
@@ -1388,47 +1391,73 @@ with tab_bulk:
                     sort_keys=True,
                     ensure_ascii=False,
                 )
-                if generate_clicked and not invalid_bulk_fields:
-                    documents = []
-                    used_names = set()
-                    with st.spinner("Generazione dei documenti..."):
-                        for (
-                            mandate, template, placeholders, values, label, _
-                        ) in mass_values_by_mandate:
-                            fields = [
-                                {"name": key, "tokens": tokens}
-                                for key, tokens in placeholders.items()
-                            ]
-                            output = core.render(template["docx"], fields, values)
-                            extension = template["format"]
-                            if extension == "doc":
-                                output = core.convert(output, "docx", "doc")
-                            filename_base = core._norm(label).replace("_", " ") or "anagrafica"
-                            filename = f"Mandato {filename_base}.{extension}"
-                            duplicate = 2
-                            while filename.casefold() in used_names:
-                                filename = (
-                                    f"Mandato {filename_base} ({duplicate}).{extension}"
-                                )
-                                duplicate += 1
-                            used_names.add(filename.casefold())
-                            documents.append((filename, output))
-                    st.session_state["mass_archive"] = core.create_document_archive(
-                        documents
-                    )
-                    st.session_state["mass_archive_signature"] = mass_signature
+                with mass_right:
+                    st.subheader("Anteprima")
+                    st.caption("Bordo rosso: campo non compilato. Verde: valore inserito. Premi «Aggiorna anteprima» dopo le modifiche.")
+                    if mass_values_by_mandate:
+                        preview_index = st.selectbox(
+                            "Mandato da visualizzare",
+                            range(len(mass_values_by_mandate)),
+                            format_func=lambda number: mass_values_by_mandate[number][4],
+                            key="mass_preview_index",
+                        )
+                        _, preview_template, preview_placeholders, preview_values, _, _ = (
+                            mass_values_by_mandate[preview_index]
+                        )
+                        preview_fields = [
+                            {"name": key, "tokens": tokens}
+                            for key, tokens in preview_placeholders.items()
+                        ]
+                        with st.container(height=800, border=True):
+                            with st.spinner("Aggiornamento anteprima..."):
+                                for image in cached_preview(
+                                    preview_template["docx"],
+                                    json.dumps(preview_fields),
+                                    json.dumps(preview_values),
+                                ):
+                                    st.image(image, width="stretch")
+                with mass_left:
+                    if generate_clicked and not invalid_bulk_fields:
+                        documents = []
+                        used_names = set()
+                        with st.spinner("Generazione dei documenti..."):
+                            for (
+                                mandate, template, placeholders, values, label, _
+                            ) in mass_values_by_mandate:
+                                fields = [
+                                    {"name": key, "tokens": tokens}
+                                    for key, tokens in placeholders.items()
+                                ]
+                                output = core.render(template["docx"], fields, values)
+                                extension = template["format"]
+                                if extension == "doc":
+                                    output = core.convert(output, "docx", "doc")
+                                filename_base = core._norm(label).replace("_", " ") or "anagrafica"
+                                filename = f"Mandato {filename_base}.{extension}"
+                                duplicate = 2
+                                while filename.casefold() in used_names:
+                                    filename = (
+                                        f"Mandato {filename_base} ({duplicate}).{extension}"
+                                    )
+                                    duplicate += 1
+                                used_names.add(filename.casefold())
+                                documents.append((filename, output))
+                        st.session_state["mass_archive"] = core.create_document_archive(
+                            documents
+                        )
+                        st.session_state["mass_archive_signature"] = mass_signature
 
-                if (
-                    st.session_state.get("mass_archive")
-                    and st.session_state.get("mass_archive_signature") == mass_signature
-                ):
-                    st.download_button(
-                        "Scarica i mandati separati (ZIP)",
-                        st.session_state["mass_archive"],
-                        file_name="Mandati_massivi.zip",
-                        mime="application/zip",
-                        key="mass_download",
-                    )
+                    if (
+                        st.session_state.get("mass_archive")
+                        and st.session_state.get("mass_archive_signature") == mass_signature
+                    ):
+                        st.download_button(
+                            "Scarica i mandati separati (ZIP)",
+                            st.session_state["mass_archive"],
+                            file_name="Mandati_massivi.zip",
+                            mime="application/zip",
+                            key="mass_download",
+                        )
 
 with tab_archive:
     st.subheader("Archivio condiviso delle persone giuridiche")
