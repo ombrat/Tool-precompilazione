@@ -12,6 +12,12 @@ class BulkGenerationTests(unittest.TestCase):
         self.assertIsNone(core.classify_customer_type(""))
         self.assertIsNone(core.classify_customer_type("-1234567890"))
 
+    def test_splits_additional_legal_representative_and_owner_placeholders(self):
+        self.assertEqual(core.split_role("COGNOME_LR2"), ("COGNOME", "LR2"))
+        self.assertEqual(core.split_role("PERCENTUALE_TE3"), ("PERCENTUALE", "TE3"))
+        self.assertEqual(core.role_label("LR2"), "Legale rappresentante 2")
+        self.assertEqual(core.role_label("TE3"), "Titolare effettivo 3")
+
     def test_creates_zip_with_individual_documents(self):
         content = core.create_document_archive(
             [("Mandato Mario Rossi.docx", b"persona fisica"),

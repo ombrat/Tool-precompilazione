@@ -489,7 +489,7 @@ def _ph_key(m):
     return re.sub(r"_TE_(\d+)$", r"_TE\1", key)  # [COGNOME TE 2] == [COGNOME TE2]
 
 
-ROLE_RE = re.compile(r"^(.+)_(LR|TE\d*)$")
+ROLE_RE = re.compile(r"^(.+)_(LR\d*|TE\d*)$")
 CARICHE = [
     "Amministratore unico", "Amministratore delegato", "Legale rappresentante",
     "Presidente del consiglio di amministrazione", "Consigliere", "Procuratore", "Socio", "Altro",
@@ -538,15 +538,19 @@ def legal_form_from_company_name(company_name):
 
 
 def role_label(role):
-    if role == "LR":
-        return "Legale rappresentante"
+    if role.startswith("LR"):
+        number = role[2:]
+        return f"Legale rappresentante {number}" if number else "Legale rappresentante"
     return f"Titolare effettivo {role[2:]}".strip()
 
 
 def roles_for_customer_type(roles, ctype):
     if ctype != "giuridica":
         return roles
-    ordered = {"LR": roles.get("LR", []), "TE1": roles.get("TE1", [])}
+    ordered = {}
+    for role in ("LR", "TE1"):
+        if role in roles:
+            ordered[role] = roles[role]
     ordered.update((role, keys) for role, keys in roles.items() if role not in ordered)
     return ordered
 

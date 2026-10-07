@@ -676,17 +676,6 @@ with tab_bulk:
             )
 
             if st.session_state["mass_phase"] == 1:
-                corporate_roles = {}
-                for role, keys in mass_templates.get("giuridica", {}).get(
-                    "placeholders", {}
-                ).items():
-                    suffix = core.split_role(role)[1]
-                    if suffix:
-                        corporate_roles.setdefault(suffix, []).extend(keys)
-                roles_to_select = ["LR", "TE1"] + [
-                    role for role in corporate_roles
-                    if role not in {"LR", "TE1"}
-                ]
                 selected_corporates = [
                     (option, bulk_records[option][1])
                     for option in selected_keys
@@ -698,37 +687,84 @@ with tab_bulk:
                         f"Legale rappresentante e titolari effettivi — {company_name}",
                         expanded=True,
                     ):
-                        for role in roles_to_select:
-                            role_label = core.role_label(role)
-                            selection_key = f"mass_person_{core._norm(option)}_{role}"
-                            person_index = st.selectbox(
-                                role_label,
+                        company_key = core._norm(option)
+                        lr_count_key = f"mass_lr_count_{company_key}"
+                        te_count_key = f"mass_te_count_{company_key}"
+                        st.session_state.setdefault(lr_count_key, 1)
+                        st.session_state.setdefault(te_count_key, 1)
+
+                        lr_add, lr_remove = st.columns(2)
+                        if lr_add.button(
+                            "Aggiungi legale rappresentante",
+                            key=f"mass_add_lr_{company_key}",
+                        ):
+                            st.session_state[lr_count_key] += 1
+                            st.rerun()
+                        if st.session_state[lr_count_key] > 1 and lr_remove.button(
+                            "Rimuovi ultimo legale rappresentante",
+                            key=f"mass_remove_lr_{company_key}",
+                        ):
+                            st.session_state[lr_count_key] -= 1
+                            st.rerun()
+
+                        for number in range(st.session_state[lr_count_key]):
+                            role = "LR" if number == 0 else f"LR{number + 1}"
+                            st.markdown(f"**{core.role_label(role)}**")
+                            st.selectbox(
+                                "Persona",
                                 list(range(len(people))),
                                 index=None,
                                 placeholder="Seleziona una persona...",
                                 format_func=lambda index: core.record_label(
                                     "fisica", people[index]
                                 ),
-                                key=selection_key,
+                                key=f"mass_person_{company_key}_{role}",
                             )
                             role_value = st.selectbox(
                                 "Carica / ruolo",
                                 [""] + core.CARICHE,
-                                key=f"mass_role_{core._norm(option)}_{role}",
+                                key=f"mass_role_{company_key}_{role}",
                             )
                             if role_value == "Altro":
-                                role_value = st.text_input(
-                                    "Specifica il ruolo",
-                                    key=f"mass_role_other_{core._norm(option)}_{role}",
+                                st.text_input(
+                                    "Specifica la carica",
+                                    key=f"mass_role_other_{company_key}_{role}",
                                 )
-                            percentage = st.number_input(
+
+                        te_add, te_remove = st.columns(2)
+                        if te_add.button(
+                            "Aggiungi titolare effettivo",
+                            key=f"mass_add_te_{company_key}",
+                        ):
+                            st.session_state[te_count_key] += 1
+                            st.rerun()
+                        if st.session_state[te_count_key] > 1 and te_remove.button(
+                            "Rimuovi ultimo titolare effettivo",
+                            key=f"mass_remove_te_{company_key}",
+                        ):
+                            st.session_state[te_count_key] -= 1
+                            st.rerun()
+
+                        for number in range(st.session_state[te_count_key]):
+                            role = f"TE{number + 1}"
+                            st.markdown(f"**{core.role_label(role)} (socio)**")
+                            st.selectbox(
+                                "Persona",
+                                list(range(len(people))),
+                                index=None,
+                                placeholder="Seleziona una persona...",
+                                format_func=lambda index: core.record_label(
+                                    "fisica", people[index]
+                                ),
+                                key=f"mass_person_{company_key}_{role}",
+                            )
+                            st.number_input(
                                 "Percentuale di titolarità",
                                 min_value=0.0,
                                 max_value=100.0,
                                 step=0.01,
                                 format="%.2f",
-                                key=f"mass_percentage_{core._norm(option)}_{role}",
-                                disabled=role == "LR",
+                                key=f"mass_percentage_{company_key}_{role}",
                             )
 
                 if st.button(
@@ -747,37 +783,57 @@ with tab_bulk:
                             "roles": {},
                         }
                         if customer_type == "giuridica":
-                            for role in roles_to_select:
-                                widget_suffix = f"{core._norm(option)}_{role}"
+                            company_key = core._norm(option)
+                            role_slots = [
+                                *(
+                                    ("LR" if number == 0 else f"LR{number + 1}")
+                                    for number in range(
+                                        st.session_state[f"mass_lr_count_{company_key}"]
+                                    )
+                                ),
+                                *(
+                                    f"TE{number + 1}"
+                                    for number in range(
+                                        st.session_state[f"mass_te_count_{company_key}"]
+                                    )
+                                ),
+                            ]
+                            for role in role_slots:
+                                widget_suffix = f"{company_key}_{role}"
                                 person_index = st.session_state.get(
                                     f"mass_person_{widget_suffix}"
                                 )
-                                role_value = st.session_state.get(
-                                    f"mass_role_{widget_suffix}", ""
-                                )
-                                if role_value == "Altro":
-                                    role_value = st.session_state.get(
-                                        f"mass_role_other_{widget_suffix}", ""
-                                    )
                                 if person_index is None:
                                     errors.append(
                                         f"{core.record_label(customer_type, record)}: "
                                         f"seleziona {core.role_label(role).lower()}."
                                     )
                                     continue
-                                if not role_value.strip():
-                                    errors.append(
-                                        f"{core.record_label(customer_type, record)}: "
-                                        f"inserisci il ruolo per {core.role_label(role).lower()}."
+                                role_value = ""
+                                if role.startswith("LR"):
+                                    role_value = st.session_state.get(
+                                        f"mass_role_{widget_suffix}", ""
                                     )
+                                    if role_value == "Altro":
+                                        role_value = st.session_state.get(
+                                            f"mass_role_other_{widget_suffix}", ""
+                                        )
+                                    if not role_value.strip():
+                                        errors.append(
+                                            f"{core.record_label(customer_type, record)}: "
+                                            f"inserisci la carica per "
+                                            f"{core.role_label(role).lower()}."
+                                        )
                                 mandate["roles"][role] = {
                                     "person": people[person_index],
-                                    "role": role_value.strip(),
+                                    "role": role_value.strip() or (
+                                        "Socio" if role.startswith("TE") else ""
+                                    ),
                                     "percentage": str(
                                         st.session_state.get(
                                             f"mass_percentage_{widget_suffix}", 0
                                         )
-                                    ),
+                                    ) if role.startswith("TE") else "",
                                 }
                         mandates.append(mandate)
                     if errors:
