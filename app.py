@@ -225,6 +225,36 @@ def cached_mass_template(template_bytes, template_format):
     return docx_template, core.find_placeholders(docx_template)
 
 
+def session_archive_profiles(database_url):
+    cached = st.session_state.get("archive_profiles_cache")
+    if cached is None or cached["database_url"] != database_url:
+        cached = {
+            "database_url": database_url,
+            "profiles": core.list_archive_profiles(database_url),
+        }
+        st.session_state["archive_profiles_cache"] = cached
+    return cached["profiles"]
+
+
+def session_default_database_info(database_url):
+    cached = st.session_state.get("default_database_info_cache")
+    if cached is None or cached["database_url"] != database_url:
+        cached = {
+            "database_url": database_url,
+            "info": core.get_default_database_info(database_url),
+        }
+        st.session_state["default_database_info_cache"] = cached
+    return cached["info"]
+
+
+def invalidate_session_default_database_cache():
+    st.session_state.pop("default_database_info_cache", None)
+
+
+def invalidate_session_profiles_cache():
+    st.session_state.pop("archive_profiles_cache", None)
+
+
 def _normalize_percentage_widgets(widget_keys, error_key):
     errors = []
     for widget_key in widget_keys:
@@ -299,14 +329,14 @@ def _find_record_index(snapshot, records):
 archive_profiles, archive_error = [], None
 if archive_database_url:
     try:
-        archive_profiles = core.list_archive_profiles(archive_database_url)
+        archive_profiles = session_archive_profiles(archive_database_url)
     except Exception as error:
         archive_error = str(error)
 
 default_database_info, default_database_error = None, None
 if archive_database_url and not archive_error:
     try:
-        default_database_info = core.get_default_database_info(archive_database_url)
+        default_database_info = session_default_database_info(archive_database_url)
     except Exception as error:
         default_database_error = str(error)
 
@@ -441,6 +471,7 @@ with tab_main:
                         except Exception as error:
                             st.error(f"Impossibile aggiornare la scheda: {error}")
                         else:
+                            invalidate_session_profiles_cache()
                             st.rerun()
                 ctype = "giuridica"
             roles = core.roles_for_customer_type(roles, ctype)
@@ -614,6 +645,7 @@ with tab_main:
                         except Exception as error:
                             st.error(f"Impossibile salvare la scheda: {error}")
                         else:
+                            invalidate_session_profiles_cache()
                             st.success("Anagrafica salvata nell'archivio.")
 
             if st.button("Genera documento", type="primary", disabled=invalid_commission):
@@ -1303,6 +1335,7 @@ with tab_archive:
                     except Exception as error:
                         st.error(f"Impossibile eliminare la scheda: {error}")
                     else:
+                        invalidate_session_profiles_cache()
                         st.session_state["archive_notice"] = "Scheda eliminata."
                         st.rerun()
         else:
@@ -1417,6 +1450,7 @@ with tab_archive:
                     except Exception as error:
                         st.error(f"Impossibile salvare la scheda: {error}")
                     else:
+                        invalidate_session_profiles_cache()
                         st.session_state["archive_notice"] = "Scheda salvata nell'archivio."
                         st.rerun()
 
@@ -1428,6 +1462,7 @@ with tab_archive:
                     except Exception as error:
                         st.error(f"Impossibile eliminare la scheda: {error}")
                     else:
+                        invalidate_session_profiles_cache()
                         st.session_state["archive_notice"] = "Scheda eliminata."
                         st.rerun()
 
@@ -1489,6 +1524,7 @@ with tab_db:
             except Exception as error:
                 st.error(f"Impossibile salvare l'anagrafica condivisa: {error}")
             else:
+                invalidate_session_default_database_cache()
                 st.session_state["default_db_xls"] = st.session_state["uploaded_xls"]
                 st.session_state["default_db_sha256"] = digest
                 st.session_state["default_db_notice"] = (
