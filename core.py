@@ -46,6 +46,7 @@ BASE = Path(__file__).parent
 TEMPLATES_DIR = BASE / "templates"
 SETTINGS_FILE = BASE / "settings.json"
 PLACEHOLDER_RE = re.compile(r"\{\{\s*(\w+)\s*\}\}|\[([A-ZÀ-Ý][A-ZÀ-Ý0-9 _']*)\]")
+PREMISE_FIELD_RE = re.compile(r"\[([A-ZÀ-Ý][A-ZÀ-Ý0-9 _']*)\]")
 CUSTOMER_TYPES = {"fisica": "Persona fisica", "giuridica": "Persona giuridica"}
 ARCHIVE_METADATA = MetaData()
 ARCHIVE_PROFILES = Table(
@@ -684,6 +685,52 @@ def find_placeholders(docx_bytes):
             if m.group(0) not in tokens:
                 tokens.append(m.group(0))
     return found
+
+
+def find_premise_fields(premise):
+    """Restituisce una volta sola ogni etichetta maiuscola tra parentesi quadre."""
+    fields = []
+    seen = set()
+    for match in PREMISE_FIELD_RE.finditer(str(premise or "")):
+        label = match.group(1).strip()
+        normalized = _norm(label).upper()
+        if normalized not in seen:
+            fields.append(label)
+            seen.add(normalized)
+    return fields
+
+
+def fill_premise_fields(premise, values):
+    """Sostituisce le etichette della premessa senza reinterpretare il testo inserito."""
+    normalized_values = {
+        _norm(name).upper(): format_premise_field_value(name, value)
+        for name, value in values.items()
+    }
+    return PREMISE_FIELD_RE.sub(
+        lambda match: normalized_values.get(
+            _norm(match.group(1)).upper(), match.group(0)
+        ),
+        str(premise or ""),
+    )
+
+
+def format_premise_field_value(name, value):
+    """Format numeric premise fields as Italian amounts or percentages with words."""
+    raw = "" if value is None else str(value).strip()
+    if not raw or not re.fullmatch(r"[\d.,\s]+", raw):
+        return raw
+    if "PERCENTUAL" in _norm(name).upper():
+        formatted = format_percentage_value(raw)
+        number = formatted[:-1]
+        whole, decimals = number.split(",")
+        words = _integer_words(int(whole))
+        if decimals != "00":
+            decimal_words = _under_hundred(int(decimals))
+            if decimals.startswith("0"):
+                decimal_words = "zero " + _UNIT_WORDS[int(decimals[1])]
+            words += f" virgola {decimal_words}"
+        return f"{formatted} ({words} per cento)"
+    return format_commission_value("COMMISSIONE_ANNUALE", raw)
 
 
 def _chunk_html(text, styles, a, b):

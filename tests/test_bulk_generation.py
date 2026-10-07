@@ -3,6 +3,7 @@ import unittest
 import zipfile
 
 import core
+from docx import Document
 
 
 class BulkGenerationTests(unittest.TestCase):
@@ -24,6 +25,81 @@ class BulkGenerationTests(unittest.TestCase):
         self.assertEqual(core.format_percentage_value("10.50%"), "10,50%")
         with self.assertRaisesRegex(ValueError, "compresa tra 0 e 100"):
             core.format_percentage_value("100,01")
+
+    def test_finds_and_fills_fields_inside_archived_premise(self):
+        premise = "La società [SOCIETA] con sede in [INDIRIZZO], rappresentata da [SOCIETA]."
+        self.assertEqual(
+            core.find_premise_fields(premise),
+            ["SOCIETA", "INDIRIZZO"],
+        )
+        filled = core.fill_premise_fields(
+            premise,
+            {"SOCIETA": "Alfa S.r.l.", "INDIRIZZO": "Via Roma 1"},
+        )
+        self.assertEqual(
+            filled,
+            "La società Alfa S.r.l. con sede in Via Roma 1, "
+            "rappresentata da Alfa S.r.l..",
+        )
+
+    def test_formats_numeric_premise_fields_as_amounts_and_words(self):
+        filled = core.fill_premise_fields(
+            "Il compenso è [IMPORTO] ([IMPORTO]), la quota è "
+            "[PERCENTUALE] e il motivo è [CAUSALE].",
+            {
+                "IMPORTO": "1000",
+                "PERCENTUALE": "10",
+                "CAUSALE": "consulenza",
+            },
+        )
+
+        self.assertEqual(
+            filled,
+            "Il compenso è 1.000,00 (mille/00) "
+            "(1.000,00 (mille/00)), la quota è "
+            "10,00% (dieci per cento) e il motivo è consulenza.",
+        )
+        self.assertEqual(
+            core.format_premise_field_value("IMPORTO", "1000,5"),
+            "1.000,50 (mille/50)",
+        )
+        with self.assertRaisesRegex(ValueError, "importo numerico"):
+            core.format_premise_field_value("IMPORTO", "1000,555")
+        self.assertEqual(
+            core.format_premise_field_value("PERCENTUALE", "10,5"),
+            "10,50% (dieci virgola cinquanta per cento)",
+        )
+        self.assertEqual(
+            core.format_premise_field_value("PERCENTUALE", "10,05"),
+            "10,05% (dieci virgola zero cinque per cento)",
+        )
+        with self.assertRaisesRegex(ValueError, "compresa tra 0 e 100"):
+            core.format_premise_field_value("PERCENTUALE", "100,01")
+
+    def test_filled_premise_fields_are_rendered_in_document(self):
+        document = Document()
+        document.add_paragraph("Premessa: {{PREMESSA}}")
+        source = io.BytesIO()
+        document.save(source)
+        premise = core.fill_premise_fields(
+            "La società [SOCIETA] è rappresentata da [LEGALE RAPPRESENTANTE].",
+            {
+                "SOCIETA": "Alfa S.r.l.",
+                "LEGALE RAPPRESENTANTE": "Mario Rossi",
+            },
+        )
+
+        rendered = core.render(
+            source.getvalue(),
+            [{"name": "PREMESSA", "tokens": ["{{PREMESSA}}"]}],
+            {"PREMESSA": premise},
+        )
+
+        output = Document(io.BytesIO(rendered))
+        self.assertEqual(
+            output.paragraphs[0].text,
+            "Premessa: La società Alfa S.r.l. è rappresentata da Mario Rossi.",
+        )
 
     def test_creates_zip_with_individual_documents(self):
         content = core.create_document_archive(

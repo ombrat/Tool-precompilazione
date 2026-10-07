@@ -188,7 +188,8 @@ def _apply_archived_premise(select_key, target_key, premises_by_id):
 
 
 def _render_premise_widget(
-    name, label, initial, widget_key, premises_by_id, in_form=False
+    name, label, initial, widget_key, premises_by_id, in_form=False,
+    field_initials=None,
 ):
     select_key = f"{widget_key}_archived_premise"
     archive_ready = bool(archive_database_url and not premises_error)
@@ -232,6 +233,21 @@ def _render_premise_widget(
         st.caption("Configura ARCHIVE_DATABASE_URL per caricare o salvare premesse.")
 
     value = _render_field_widget(name, label, initial, widget_key, multiline=True)
+    premise_fields = core.find_premise_fields(value)
+    field_values = {}
+    if premise_fields:
+        st.markdown("**Dati della premessa**")
+        for field in premise_fields:
+            field_key = (
+                f"{widget_key}_premise_field_{core._norm(field)}"
+            )
+            field_values[field] = st.text_input(
+                field,
+                value=(field_initials or {}).get(
+                    field_key, st.session_state.get(field_key, "")
+                ),
+                key=field_key,
+            )
     save_label = "💾 Salva premessa"
     if in_form:
         save_clicked = st.form_submit_button(
@@ -245,7 +261,14 @@ def _render_premise_widget(
             key=f"{widget_key}_save_archived_premise",
             disabled=not archive_database_url,
         )
-    return value, save_clicked
+    invalid_fields = False
+    try:
+        filled_value = core.fill_premise_fields(value, field_values)
+    except ValueError as error:
+        st.error(f"Valore numerico non valido nella premessa: {error}")
+        filled_value = value
+        invalid_fields = True
+    return filled_value, save_clicked, value, invalid_fields
 
 
 @st.dialog("Salva premessa nell'archivio")
@@ -292,19 +315,22 @@ def _render_document_field(key, record, mapping, record_id):
     else:
         initial = core.format_field_value(key, record.get(col) if col else None)
     widget_key = f"v_{record_id}_{key}{_field_widget_revision(key)}"
+    invalid_premise = False
     if "PREMESSA" in core._norm(key).upper():
-        raw_value, save_clicked = _render_premise_widget(
+        rendered_value, save_clicked, raw_value, invalid_premise = _render_premise_widget(
             key, label, initial, widget_key, premise_by_id
         )
         if save_clicked:
             _open_premise_save_dialog(raw_value)
     else:
-        raw_value = _render_field_widget(
+        rendered_value = _render_field_widget(
             key, label, initial, widget_key,
             multiline=core._norm(key).upper() not in core.PREDEFINED,
         )
     try:
-        return core.format_field_value(key, core.format_commission_value(key, raw_value)), False
+        return core.format_field_value(
+            key, core.format_commission_value(key, rendered_value)
+        ), invalid_premise
     except ValueError as error:
         st.error(f"{label}: {error}")
         return "", True
@@ -393,6 +419,10 @@ def _save_mass_manual_values(widget_keys):
     saved_values = st.session_state.setdefault("mass_manual_values", {})
     for widget_key in widget_keys:
         saved_values[widget_key] = st.session_state.get(widget_key, "")
+        field_prefix = f"{widget_key}_premise_field_"
+        for state_key in st.session_state:
+            if state_key.startswith(field_prefix):
+                saved_values[state_key] = st.session_state[state_key]
 
 
 def _save_mass_role_widgets(selected_corporates, people):
@@ -676,6 +706,7 @@ with tab_main:
 
             values = {}
             role_data = {}
+            premise_errors = {"invalid": False}
             if roles and not selected_archive:
                 try:
                     people = core.db_records("fisica", active_xls_content)
@@ -741,15 +772,21 @@ with tab_main:
                             init = core.format_field_value(base, person.get(col) if col else None)
                             k = f"v_{rid}_{key}_{person.get('id', '')}{key_revision}"
                         if "PREMESSA" in core._norm(base).upper():
-                            raw_value, save_clicked = _render_premise_widget(
+                            (
+                                rendered_value,
+                                save_clicked,
+                                premise_text,
+                                invalid_premise,
+                            ) = _render_premise_widget(
                                 base, label, init, k, premise_by_id
                             )
+                            premise_errors["invalid"] |= invalid_premise
                             if save_clicked:
-                                _open_premise_save_dialog(raw_value)
+                                _open_premise_save_dialog(premise_text)
                         else:
-                            raw_value = _render_field_widget(base, label, init, k)
+                            rendered_value = _render_field_widget(base, label, init, k)
                         values[key] = core.format_field_value(
-                            base, raw_value
+                            base, rendered_value
                         )
                     role_data[role] = {"person": person, "carica": carica, "keys": keys}
                     visible_role_keys = [
@@ -768,7 +805,7 @@ with tab_main:
                                 render_role_field(key)
 
             st.markdown("**Campi del documento**")
-            invalid_commission = False
+            invalid_commission = premise_errors["invalid"]
             visible_main_keys = [key for key in main_keys if not core.is_anagraphic_field(key)]
             anagraphic_main_keys = [key for key in main_keys if core.is_anagraphic_field(key)]
             for key in visible_main_keys:
@@ -1484,18 +1521,25 @@ with tab_bulk:
                                             f"mass_value_{record_key}_{core._norm(key)}"
                                         )
                                         if "PREMESSA" in core._norm(key).upper():
-                                            raw_value, save_clicked = _render_premise_widget(
+                                            (
+                                                rendered_value,
+                                                save_clicked,
+                                                premise_text,
+                                                invalid_premise,
+                                            ) = _render_premise_widget(
                                                 key,
                                                 field_label,
                                                 saved_manual_values.get(widget_key, ""),
                                                 widget_key,
                                                 premise_by_id,
                                                 in_form=True,
+                                                field_initials=saved_manual_values,
                                             )
+                                            invalid_bulk_fields |= invalid_premise
                                             if save_clicked:
-                                                premise_save_request = raw_value
+                                                premise_save_request = premise_text
                                         else:
-                                            raw_value = _render_field_widget(
+                                            rendered_value = _render_field_widget(
                                                 key,
                                                 field_label,
                                                 saved_manual_values.get(widget_key, ""),
@@ -1505,7 +1549,9 @@ with tab_bulk:
                                         try:
                                             values[key] = core.format_field_value(
                                                 key,
-                                                core.format_commission_value(key, raw_value),
+                                                core.format_commission_value(
+                                                    key, rendered_value
+                                                ),
                                             )
                                         except ValueError as error:
                                             invalid_bulk_fields = True
