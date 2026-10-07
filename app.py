@@ -237,22 +237,54 @@ def _normalize_percentage_widgets(widget_keys, error_key):
     st.session_state[error_key] = errors
 
 
-def _adjust_mass_role_count(
-    count_key,
-    delta,
-    option,
-    removed_role,
-    widget_keys,
-    percentage_keys=(),
-    percentage_error_key=None,
-):
-    if percentage_error_key:
-        _normalize_percentage_widgets(percentage_keys, percentage_error_key)
-    st.session_state[count_key] += delta
-    if removed_role:
-        st.session_state["mass_role_data"].get(option, {}).pop(removed_role, None)
-        for widget_key in widget_keys:
-            st.session_state.pop(widget_key, None)
+def _save_mass_manual_values(widget_keys):
+    saved_values = st.session_state.setdefault("mass_manual_values", {})
+    for widget_key in widget_keys:
+        saved_values[widget_key] = st.session_state.get(widget_key, "")
+
+
+def _save_mass_role_widgets(selected_corporates, people):
+    for option, _ in selected_corporates:
+        company_key = core._norm(option)
+        role_data = st.session_state["mass_role_data"].setdefault(option, {})
+        lr_count = st.session_state[f"mass_lr_count_{company_key}"]
+        te_count = st.session_state[f"mass_te_count_{company_key}"]
+
+        for number in range(lr_count):
+            role = "LR" if number == 0 else f"LR{number + 1}"
+            person_index = st.session_state.get(
+                f"mass_person_{company_key}_{role}"
+            )
+            role_value = st.session_state.get(
+                f"mass_role_{company_key}_{role}", ""
+            )
+            if role_value == "Altro":
+                role_value = st.session_state.get(
+                    f"mass_role_other_{company_key}_{role}", ""
+                )
+            role_data[role] = {
+                "person": people[person_index] if person_index is not None else {},
+                "role": role_value.strip(),
+                "percentage": "",
+            }
+
+        for number in range(te_count):
+            role = f"TE{number + 1}"
+            person_index = st.session_state.get(
+                f"mass_person_{company_key}_{role}"
+            )
+            percentage = st.session_state.get(
+                f"mass_percentage_{company_key}_{role}", ""
+            )
+            try:
+                percentage = core.format_percentage_value(percentage)
+            except ValueError:
+                pass
+            role_data[role] = {
+                "person": people[person_index] if person_index is not None else {},
+                "role": "Socio",
+                "percentage": percentage,
+            }
 
 
 def _find_record_index(snapshot, records):
@@ -726,7 +758,7 @@ with tab_bulk:
                         st.error("Seleziona almeno un'anagrafica.")
                     else:
                         st.session_state["mass_selected_records"] = selected_keys
-                        st.session_state["mass_role_data"] = {}
+                        st.session_state.setdefault("mass_role_data", {})
                         profile_by_identity = {
                             core.record_identity(profile["payload"]["company"]): profile
                             for profile in archive_profiles
@@ -736,25 +768,20 @@ with tab_bulk:
                             if customer_type != "giuridica":
                                 continue
                             company_key = core._norm(option)
-                            for state_key in list(st.session_state):
-                                if state_key.startswith(
-                                    (
-                                        f"mass_person_{company_key}_",
-                                        f"mass_role_{company_key}_",
-                                        f"mass_role_other_{company_key}_",
-                                        f"mass_percentage_{company_key}_",
-                                    )
-                                ):
-                                    st.session_state.pop(state_key, None)
                             profile = profile_by_identity.get(
                                 core.record_identity(record)
                             )
                             payload = profile["payload"] if profile else {}
                             saved_owners = payload.get("owners", [])
-                            st.session_state[f"mass_lr_count_{company_key}"] = 1
-                            st.session_state[f"mass_te_count_{company_key}"] = max(
-                                1, len(saved_owners)
+                            st.session_state.setdefault(
+                                f"mass_lr_count_{company_key}", 1
                             )
+                            st.session_state.setdefault(
+                                f"mass_te_count_{company_key}",
+                                max(1, len(saved_owners)),
+                            )
+                            if option in st.session_state["mass_role_data"]:
+                                continue
                             role_data = {}
                             representative = payload.get("legal_representative")
                             if representative:
@@ -785,24 +812,33 @@ with tab_bulk:
                     for option in selected_keys
                     if bulk_records[option][0] == "giuridica"
                 ]
-                for option, company in selected_corporates:
-                    company_name = core.record_label("giuridica", company)
-                    with st.expander(
-                        f"Legale rappresentante e titolari effettivi — {company_name}",
-                        expanded=True,
-                    ):
-                        company_key = core._norm(option)
-                        role_data = st.session_state["mass_role_data"].setdefault(
-                            option, {}
-                        )
-                        lr_count_key = f"mass_lr_count_{company_key}"
-                        te_count_key = f"mass_te_count_{company_key}"
-
-                        lr_slots = [
-                            "LR" if number == 0 else f"LR{number + 1}"
-                            for number in range(st.session_state[lr_count_key])
-                        ]
-                        with st.form(f"mass_lr_form_{company_key}"):
+                percentage_keys = [
+                    f"mass_percentage_{core._norm(option)}_TE{number + 1}"
+                    for option, _ in selected_corporates
+                    for number in range(
+                        st.session_state[f"mass_te_count_{core._norm(option)}"]
+                    )
+                ]
+                percentage_error_key = "mass_percentage_errors"
+                phase_action = None
+                add_or_remove = None
+                with st.form("mass_corporate_roles_form"):
+                    for option, company in selected_corporates:
+                        company_name = core.record_label("giuridica", company)
+                        with st.expander(
+                            f"Legale rappresentante e titolari effettivi — {company_name}",
+                            expanded=True,
+                        ):
+                            company_key = core._norm(option)
+                            role_data = st.session_state["mass_role_data"].setdefault(
+                                option, {}
+                            )
+                            lr_count_key = f"mass_lr_count_{company_key}"
+                            te_count_key = f"mass_te_count_{company_key}"
+                            lr_slots = [
+                                "LR" if number == 0 else f"LR{number + 1}"
+                                for number in range(st.session_state[lr_count_key])
+                            ]
                             for role in lr_slots:
                                 saved = role_data.get(role, {})
                                 st.markdown(f"**{core.role_label(role)}**")
@@ -828,102 +864,44 @@ with tab_bulk:
                                     if saved_role in core.CARICHE
                                     else "Altro" if saved_role else ""
                                 )
+                                role_value = st.session_state.get(
+                                    role_key, default_role
+                                )
                                 st.selectbox(
                                     "Carica / ruolo",
                                     role_options,
-                                    index=role_options.index(default_role),
+                                    index=role_options.index(
+                                        role_value if role_value in role_options else default_role
+                                    ),
                                     key=role_key,
                                 )
-                                selected_role = st.session_state.get(
-                                    role_key, default_role
-                                )
-                                if selected_role == "Altro":
-                                    other_key = (
-                                        f"mass_role_other_{company_key}_{role}"
-                                    )
+                                if role_value == "Altro":
                                     st.text_input(
                                         "Specifica la carica",
                                         value=saved_role,
-                                        key=other_key,
+                                        key=f"mass_role_other_{company_key}_{role}",
                                     )
                             lr_add, lr_remove = st.columns(2)
-                            lr_add.form_submit_button(
+                            if lr_add.form_submit_button(
                                 "Aggiungi legale rappresentante",
-                                on_click=_adjust_mass_role_count,
-                                args=(
-                                    lr_count_key,
-                                    1,
-                                    option,
-                                    None,
-                                    (),
-                                ),
-                            )
-                            if len(lr_slots) > 1:
-                                last_role = lr_slots[-1]
-                                lr_remove.form_submit_button(
-                                    "Rimuovi ultimo legale rappresentante",
-                                    on_click=_adjust_mass_role_count,
-                                    args=(
-                                        lr_count_key,
-                                        -1,
-                                        option,
-                                        last_role,
-                                        (
-                                            f"mass_person_{company_key}_{last_role}",
-                                            f"mass_role_{company_key}_{last_role}",
-                                            f"mass_role_other_{company_key}_{last_role}",
-                                        ),
-                                    ),
-                                )
-                            lr_submitted = st.form_submit_button(
-                                "Salva legali rappresentanti",
-                                type="primary",
-                            )
-                        if lr_submitted:
-                            errors = []
-                            updated_roles = {}
-                            for role in lr_slots:
-                                person_index = st.session_state[
-                                    f"mass_person_{company_key}_{role}"
-                                ]
-                                role_value = st.session_state[
-                                    f"mass_role_{company_key}_{role}"
-                                ]
-                                if role_value == "Altro":
-                                    role_value = st.session_state.get(
-                                        f"mass_role_other_{company_key}_{role}", ""
-                                    )
-                                if person_index is None or not role_value.strip():
-                                    errors.append(
-                                        f"Completa persona e carica per "
-                                        f"{core.role_label(role).lower()}."
-                                    )
-                                    continue
-                                updated_roles[role] = {
-                                    "person": people[person_index],
-                                    "role": role_value.strip(),
-                                    "percentage": "",
-                                }
-                            if errors:
-                                st.error(" ".join(errors))
-                            else:
-                                role_data.update(updated_roles)
-                                st.session_state["mass_role_data"][option] = role_data
-                                st.success("Legali rappresentanti salvati.")
+                                on_click=_normalize_percentage_widgets,
+                                args=(percentage_keys, percentage_error_key),
+                                key=f"mass_add_lr_{company_key}",
+                            ):
+                                add_or_remove = ("add_lr", option, None)
+                            if len(lr_slots) > 1 and lr_remove.form_submit_button(
+                                "Rimuovi ultimo legale rappresentante",
+                                on_click=_normalize_percentage_widgets,
+                                args=(percentage_keys, percentage_error_key),
+                                key=f"mass_remove_lr_{company_key}",
+                            ):
+                                add_or_remove = ("remove_lr", option, lr_slots[-1])
 
-                        te_slots = [
-                            f"TE{number + 1}"
-                            for number in range(st.session_state[te_count_key])
-                        ]
-                        percentage_keys = [
-                            f"mass_percentage_{company_key}_{role}"
-                            for role in te_slots
-                        ]
-                        percentage_error_key = (
-                            f"mass_percentage_errors_{company_key}"
-                        )
-                        with st.form(f"mass_te_form_{company_key}"):
-                            for role, percentage_key in zip(te_slots, percentage_keys):
+                            te_slots = [
+                                f"TE{number + 1}"
+                                for number in range(st.session_state[te_count_key])
+                            ]
+                            for role in te_slots:
                                 saved = role_data.get(role, {})
                                 st.markdown(f"**{core.role_label(role)} (socio)**")
                                 person_key = f"mass_person_{company_key}_{role}"
@@ -940,6 +918,7 @@ with tab_bulk:
                                     ),
                                     key=person_key,
                                 )
+                                percentage_key = f"mass_percentage_{company_key}_{role}"
                                 if percentage_key not in st.session_state:
                                     st.session_state[percentage_key] = saved.get(
                                         "percentage", "0,00%"
@@ -949,85 +928,70 @@ with tab_bulk:
                                     key=percentage_key,
                                 )
                             te_add, te_remove = st.columns(2)
-                            te_add.form_submit_button(
+                            if te_add.form_submit_button(
                                 "Aggiungi titolare effettivo",
-                                on_click=_adjust_mass_role_count,
-                                args=(
-                                    te_count_key,
-                                    1,
-                                    option,
-                                    None,
-                                    (),
-                                    percentage_keys,
-                                    percentage_error_key,
-                                ),
-                            )
-                            if len(te_slots) > 1:
-                                last_role = te_slots[-1]
-                                te_remove.form_submit_button(
-                                    "Rimuovi ultimo titolare effettivo",
-                                    on_click=_adjust_mass_role_count,
-                                    args=(
-                                        te_count_key,
-                                        -1,
-                                        option,
-                                        last_role,
-                                        (
-                                            f"mass_person_{company_key}_{last_role}",
-                                            f"mass_percentage_{company_key}_{last_role}",
-                                        ),
-                                        percentage_keys[:-1],
-                                        percentage_error_key,
-                                    ),
-                                )
-                            te_submitted = st.form_submit_button(
-                                "Salva titolari effettivi",
-                                type="primary",
                                 on_click=_normalize_percentage_widgets,
                                 args=(percentage_keys, percentage_error_key),
-                            )
-                        if st.session_state.get(percentage_error_key):
-                            st.error(
-                                " ".join(st.session_state[percentage_error_key])
-                            )
-                        if te_submitted:
-                            errors = []
-                            updated_roles = {}
-                            for role, percentage_key in zip(te_slots, percentage_keys):
-                                person_index = st.session_state[
-                                    f"mass_person_{company_key}_{role}"
-                                ]
-                                if person_index is None:
-                                    errors.append(
-                                        f"Seleziona {core.role_label(role).lower()}."
-                                    )
-                                    continue
-                                try:
-                                    percentage = core.format_percentage_value(
-                                        st.session_state[percentage_key]
-                                    )
-                                except ValueError as error:
-                                    errors.append(str(error))
-                                    continue
-                                updated_roles[role] = {
-                                    "person": people[person_index],
-                                    "role": "Socio",
-                                    "percentage": percentage,
-                                }
-                            if errors:
-                                st.error(" ".join(errors))
-                            else:
-                                role_data.update(updated_roles)
-                                st.session_state["mass_role_data"][option] = role_data
-                                st.session_state[percentage_error_key] = []
-                                st.success("Titolari effettivi salvati.")
+                                key=f"mass_add_te_{company_key}",
+                            ):
+                                add_or_remove = ("add_te", option, None)
+                            if len(te_slots) > 1 and te_remove.form_submit_button(
+                                "Rimuovi ultimo titolare effettivo",
+                                on_click=_normalize_percentage_widgets,
+                                args=(percentage_keys, percentage_error_key),
+                                key=f"mass_remove_te_{company_key}",
+                            ):
+                                add_or_remove = ("remove_te", option, te_slots[-1])
 
-                if st.button(
-                    "Conferma anagrafiche e passa alla fase 2",
-                    type="primary",
-                    disabled=not selected_keys,
-                    key="mass_to_phase2",
-                ):
+                    back_to_selection = st.form_submit_button(
+                        "Torna alla selezione delle anagrafiche",
+                        on_click=_normalize_percentage_widgets,
+                        args=(percentage_keys, percentage_error_key),
+                    )
+                    next_to_manual = st.form_submit_button(
+                        "Conferma anagrafiche e passa alla fase 2",
+                        type="primary",
+                        disabled=not selected_keys,
+                        on_click=_normalize_percentage_widgets,
+                        args=(percentage_keys, percentage_error_key),
+                    )
+
+                if back_to_selection or next_to_manual or add_or_remove:
+                    _save_mass_role_widgets(selected_corporates, people)
+                if add_or_remove:
+                    action, option, removed_role = add_or_remove
+                    company_key = core._norm(option)
+                    if action == "add_lr":
+                        st.session_state[f"mass_lr_count_{company_key}"] += 1
+                    elif action == "remove_lr":
+                        st.session_state[f"mass_lr_count_{company_key}"] -= 1
+                        st.session_state["mass_role_data"][option].pop(
+                            removed_role, None
+                        )
+                        for key in (
+                            f"mass_person_{company_key}_{removed_role}",
+                            f"mass_role_{company_key}_{removed_role}",
+                            f"mass_role_other_{company_key}_{removed_role}",
+                        ):
+                            st.session_state.pop(key, None)
+                    elif action == "add_te":
+                        st.session_state[f"mass_te_count_{company_key}"] += 1
+                    elif action == "remove_te":
+                        st.session_state[f"mass_te_count_{company_key}"] -= 1
+                        st.session_state["mass_role_data"][option].pop(
+                            removed_role, None
+                        )
+                        for key in (
+                            f"mass_person_{company_key}_{removed_role}",
+                            f"mass_percentage_{company_key}_{removed_role}",
+                        ):
+                            st.session_state.pop(key, None)
+                    st.rerun()
+                if back_to_selection:
+                    st.session_state["mass_pending_records"] = selected_keys
+                    st.session_state["mass_phase"] = 1
+                    st.rerun()
+                if next_to_manual:
                     errors = []
                     mandates = []
                     for option in selected_keys:
@@ -1097,10 +1061,6 @@ with tab_bulk:
                     "Fase 2 — Inserisci le variabili specifiche per ciascun mandato. "
                     "I dati anagrafici e gli incarichi vengono precompilati dalla fase 1."
                 )
-                if st.button("Torna alla fase 1", key="mass_back_to_phase1"):
-                    st.session_state["mass_phase"] = 1
-                    st.rerun()
-
                 mass_values_by_mandate = []
                 invalid_bulk_fields = False
                 for number, mandate in enumerate(mandates, 1):
@@ -1159,7 +1119,19 @@ with tab_bulk:
                         (mandate, template, placeholders, values, label, manual_keys)
                     )
 
+                manual_widget_keys = [
+                    (
+                        f"mass_value_{core._norm(core.record_identity(mandate['record']))}_"
+                        f"{core._norm(key)}"
+                    )
+                    for mandate, _, _, _, _, manual_keys in mass_values_by_mandate
+                    for key in manual_keys
+                ]
+                saved_manual_values = st.session_state.setdefault(
+                    "mass_manual_values", {}
+                )
                 generate_clicked = False
+                back_to_roles = False
                 with st.form("mass_values_form"):
                     for (
                         mandate, template, placeholders, values, label, manual_keys
@@ -1181,7 +1153,7 @@ with tab_bulk:
                                     raw_value = _render_field_widget(
                                         key,
                                         field_label,
-                                        "",
+                                        saved_manual_values.get(widget_key, ""),
                                         widget_key,
                                         multiline="PREMESSA" in core._norm(key).upper()
                                         or key not in core.PREDEFINED,
@@ -1196,17 +1168,28 @@ with tab_bulk:
                                         st.error(f"{field_label}: {error}")
                             else:
                                 st.caption("Il modello non contiene variabili manuali.")
+                    back_to_roles = st.form_submit_button(
+                        "Torna alla fase 1 — LR e TE",
+                        on_click=_save_mass_manual_values,
+                        args=(manual_widget_keys,),
+                    )
                     generate_clicked = st.form_submit_button(
                         "Genera i mandati",
                         type="primary",
                         disabled=invalid_bulk_fields or not mass_values_by_mandate,
                     )
 
+                if back_to_roles:
+                    st.session_state["mass_phase"] = 2
+                    st.rerun()
+
                 mass_signature = json.dumps(
                     [
                         (
                             mandate["customer_type"],
                             core.record_identity(mandate["record"]),
+                            mandate["record"],
+                            mandate["roles"],
                             hashlib.sha256(template["docx"]).hexdigest(),
                             template["format"],
                             values,
