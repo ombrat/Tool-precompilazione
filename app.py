@@ -191,29 +191,42 @@ def _render_premise_widget(
     name, label, initial, widget_key, premises_by_id, in_form=False
 ):
     select_key = f"{widget_key}_archived_premise"
-    if archive_database_url and not premises_error:
+    archive_ready = bool(archive_database_url and not premises_error)
+    if not archive_database_url:
+        premise_ids = [None]
+        unavailable_label = "Archivio non configurato"
+    elif premises_error:
+        premise_ids = [None]
+        unavailable_label = "Premesse non disponibili"
+    else:
         premise_ids = [None] + list(premises_by_id)
-        st.selectbox(
-            "Scegli una premessa salvata",
-            premise_ids,
-            format_func=lambda premise_id: (
+        unavailable_label = "Nessuna premessa salvata"
+    st.selectbox(
+        "Scegli una premessa salvata",
+        premise_ids,
+        format_func=lambda premise_id: (
+            (
                 "Seleziona una premessa"
-                if premise_id is None
-                else premises_by_id[premise_id]["name"]
-            ),
-            key=select_key,
-            on_change=None if in_form else _apply_archived_premise,
+                if archive_ready
+                else unavailable_label
+            )
+            if premise_id is None
+            else premises_by_id[premise_id]["name"]
+        ),
+        key=select_key,
+        disabled=not archive_ready,
+        on_change=_apply_archived_premise if archive_ready and not in_form else None,
+        args=(select_key, widget_key, premises_by_id),
+    )
+    if in_form:
+        st.form_submit_button(
+            "Carica premessa selezionata",
+            key=f"{widget_key}_apply_archived_premise",
+            disabled=not archive_ready or len(premise_ids) < 2,
+            on_click=_apply_archived_premise,
             args=(select_key, widget_key, premises_by_id),
         )
-        if in_form:
-            st.form_submit_button(
-                "Carica premessa selezionata",
-                key=f"{widget_key}_apply_archived_premise",
-                disabled=len(premise_ids) < 2,
-                on_click=_apply_archived_premise,
-                args=(select_key, widget_key, premises_by_id),
-            )
-    elif premises_error:
+    if premises_error:
         st.caption(f"Archivio delle premesse non disponibile: {premises_error}")
     elif not archive_database_url:
         st.caption("Configura ARCHIVE_DATABASE_URL per caricare o salvare premesse.")
@@ -224,13 +237,13 @@ def _render_premise_widget(
         save_clicked = st.form_submit_button(
             save_label,
             key=f"{widget_key}_save_archived_premise",
-            disabled=not archive_database_url or bool(premises_error),
+            disabled=not archive_database_url,
         )
     else:
         save_clicked = st.button(
             save_label,
             key=f"{widget_key}_save_archived_premise",
-            disabled=not archive_database_url or bool(premises_error),
+            disabled=not archive_database_url,
         )
     return value, save_clicked
 
