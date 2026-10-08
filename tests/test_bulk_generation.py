@@ -4,6 +4,8 @@ import zipfile
 
 import core
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 
 
 class BulkGenerationTests(unittest.TestCase):
@@ -78,11 +80,12 @@ class BulkGenerationTests(unittest.TestCase):
 
     def test_filled_premise_fields_are_rendered_in_document(self):
         document = Document()
-        document.add_paragraph("Premessa: {{PREMESSA}}")
+        paragraph = document.add_paragraph("Premessa: {{PREMESSA}}")
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
         source = io.BytesIO()
         document.save(source)
         premise = core.fill_premise_fields(
-            "La società [SOCIETA] è rappresentata da [LEGALE RAPPRESENTANTE].",
+            "La società [SOCIETA] è rappresentata da\n[LEGALE RAPPRESENTANTE].",
             {
                 "SOCIETA": "Alfa S.r.l.",
                 "LEGALE RAPPRESENTANTE": "Mario Rossi",
@@ -98,8 +101,11 @@ class BulkGenerationTests(unittest.TestCase):
         output = Document(io.BytesIO(rendered))
         self.assertEqual(
             output.paragraphs[0].text,
-            "Premessa: La società Alfa S.r.l. è rappresentata da Mario Rossi.",
+            "Premessa: La società Alfa S.r.l. è rappresentata da\nMario Rossi.",
         )
+        self.assertEqual(output.paragraphs[0].alignment, WD_ALIGN_PARAGRAPH.JUSTIFY)
+        compat = output.settings.element.find(qn("w:compat"))
+        self.assertIsNotNone(compat.find(qn("w:doNotExpandShiftReturn")))
 
     def test_creates_zip_with_individual_documents(self):
         content = core.create_document_archive(

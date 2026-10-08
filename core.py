@@ -1081,6 +1081,16 @@ def render(docx_bytes, fields, values, preview=False):
     Con preview=True i valori sono evidenziati in verde e i segnaposto vuoti restano visibili in giallo.
     """
     doc = Document(io.BytesIO(docx_bytes))
+    compat = doc.settings.element.find(qn("w:compat"))
+    if compat is None:
+        compat = OxmlElement("w:compat")
+        doc.settings.element.append(compat)
+    no_expand = compat.find(qn("w:doNotExpandShiftReturn"))
+    if no_expand is None:
+        no_expand = OxmlElement("w:doNotExpandShiftReturn")
+        compat.append(no_expand)
+    no_expand.set(qn("w:val"), "1")
+
     paragraphs = list(all_paragraphs(doc))
     for f in fields:
         value = values.get(f["name"], "")
