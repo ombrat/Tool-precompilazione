@@ -564,67 +564,7 @@ active_xls_content = st.session_state.get("uploaded_xls") or st.session_state.ge
     "default_db_xls"
 )
 
-settings = core.load_settings()
-if active_xls_content is not None:
-    database_status = (
-        "Anagrafica condivisa disponibile"
-        if default_database_info and "uploaded_xls" not in st.session_state
-        else "File Excel caricato"
-    )
-elif default_database_error:
-    database_status = "Anagrafica condivisa non disponibile"
-elif os.path.isfile(settings.get("xls_path") or ""):
-    database_status = "File Excel locale configurato"
-elif settings.get("db_url"):
-    database_status = "Database SQL configurato"
-else:
-    database_status = "Da configurare"
-
-if not archive_database_url:
-    archive_status = "Non configurato"
-    archive_detail = "Archivio e premesse non disponibili"
-elif archive_error:
-    archive_status = "Non raggiungibile"
-    archive_detail = "Controlla la connessione all'archivio"
-else:
-    archive_status = "Connesso"
-    archive_detail = (
-        f"{len(archive_profiles)} schede · {len(archive_premises)} premesse"
-    )
-
 st.title("Precompilazione documenti")
-st.caption(
-    "Compila e genera documenti singoli o più mandati insieme. "
-    "Le schede qui sotto ti guidano nei passaggi e mostrano lo stato dei dati."
-)
-with st.container(border=True):
-    st.markdown("#### Per iniziare")
-    st.markdown(
-        "1. Scegli **Documento singolo** oppure **Generazione massiva**.  "
-        "2. Verifica i campi evidenziati.  "
-        "3. Genera e scarica il documento."
-    )
-
-status_columns = st.columns(3, gap="medium")
-with status_columns[0]:
-    with st.container(border=True):
-        st.markdown("**Modelli documento**")
-        st.write(
-            "✅ Supabase configurato · verifica il modello"
-            if supabase_url and supabase_service_role_key
-            else "⚠️ Carica un modello Word nella scheda del flusso"
-        )
-with status_columns[1]:
-    with st.container(border=True):
-        st.markdown("**Database anagrafiche**")
-        st.write(database_status)
-        if default_database_error and active_xls_content is None:
-            st.caption("Puoi caricare un file Excel dalla scheda Database.")
-with status_columns[2]:
-    with st.container(border=True):
-        st.markdown("**Archivio condiviso**")
-        st.write(archive_status)
-        st.caption(archive_detail)
 
 profile_by_id = {profile["id"]: profile for profile in archive_profiles}
 tab_main, tab_bulk, tab_db, tab_archive, tab_premises = st.tabs(
