@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import html
 import json
 import os
 
@@ -16,6 +17,28 @@ def _setting(name):
     except StreamlitSecretNotFoundError:
         secret = ""
     return os.environ.get(name) or secret
+
+
+def _field_anchor_id(widget_key):
+    return f"campo-{core._norm(widget_key)}"
+
+
+def _field_anchor(widget_key):
+    st.markdown(f'<div id="{_field_anchor_id(widget_key)}"></div>', unsafe_allow_html=True)
+
+
+def _render_field_issues(title, issues, description, *, error=False):
+    if not issues:
+        return
+    message = f"{title} ({len(issues)}). {description}"
+    (st.error if error else st.warning)(message)
+    with st.expander("Mostra i campi e vai alla correzione", expanded=True):
+        for label, widget_key in issues:
+            anchor = _field_anchor_id(widget_key)
+            st.markdown(
+                f'<a href="#{anchor}">{html.escape(label)}</a>',
+                unsafe_allow_html=True,
+            )
 
 
 app_password = _setting("APP_PASSWORD")
@@ -166,6 +189,7 @@ def _field_widget_revision(name):
 
 
 def _render_field_widget(name, label, initial, widget_key, multiline=False):
+    _field_anchor(widget_key)
     current = st.session_state.get(widget_key, initial)
     missing = not str(current or "").strip()
     if not missing and core._norm(name).upper() in {"COMMISSIONE_ANNUALE", "COMMISSIONE_APERTURA"}:
@@ -540,9 +564,77 @@ active_xls_content = st.session_state.get("uploaded_xls") or st.session_state.ge
     "default_db_xls"
 )
 
+settings = core.load_settings()
+if active_xls_content is not None:
+    database_status = (
+        "Anagrafica condivisa disponibile"
+        if default_database_info and "uploaded_xls" not in st.session_state
+        else "File Excel caricato"
+    )
+elif default_database_error:
+    database_status = "Anagrafica condivisa non disponibile"
+elif os.path.isfile(settings.get("xls_path") or ""):
+    database_status = "File Excel locale configurato"
+elif settings.get("db_url"):
+    database_status = "Database SQL configurato"
+else:
+    database_status = "Da configurare"
+
+if not archive_database_url:
+    archive_status = "Non configurato"
+    archive_detail = "Archivio e premesse non disponibili"
+elif archive_error:
+    archive_status = "Non raggiungibile"
+    archive_detail = "Controlla la connessione all'archivio"
+else:
+    archive_status = "Connesso"
+    archive_detail = (
+        f"{len(archive_profiles)} schede · {len(archive_premises)} premesse"
+    )
+
+st.title("Precompilazione documenti")
+st.caption(
+    "Compila e genera documenti singoli o più mandati insieme. "
+    "Le schede qui sotto ti guidano nei passaggi e mostrano lo stato dei dati."
+)
+with st.container(border=True):
+    st.markdown("#### Per iniziare")
+    st.markdown(
+        "1. Scegli **Documento singolo** oppure **Generazione massiva**.  "
+        "2. Verifica i campi evidenziati.  "
+        "3. Genera e scarica il documento."
+    )
+
+status_columns = st.columns(3, gap="medium")
+with status_columns[0]:
+    with st.container(border=True):
+        st.markdown("**Modelli documento**")
+        st.write(
+            "✅ Supabase configurato · verifica il modello"
+            if supabase_url and supabase_service_role_key
+            else "⚠️ Carica un modello Word nella scheda del flusso"
+        )
+with status_columns[1]:
+    with st.container(border=True):
+        st.markdown("**Database anagrafiche**")
+        st.write(database_status)
+        if default_database_error and active_xls_content is None:
+            st.caption("Puoi caricare un file Excel dalla scheda Database.")
+with status_columns[2]:
+    with st.container(border=True):
+        st.markdown("**Archivio condiviso**")
+        st.write(archive_status)
+        st.caption(archive_detail)
+
 profile_by_id = {profile["id"]: profile for profile in archive_profiles}
-tab_main, tab_bulk, tab_archive, tab_premises, tab_db = st.tabs(
-    ["Documento singolo", "Generazione massiva", "Archivio", "Premesse", "Database"]
+tab_main, tab_bulk, tab_db, tab_archive, tab_premises = st.tabs(
+    [
+        "✍️ Documento singolo",
+        "📚 Generazione massiva",
+        "⚙️ Database",
+        "🗂️ Archivio",
+        "📝 Premesse",
+    ]
 )
 
 if notice := st.session_state.pop("premise_archive_notice", None):
@@ -705,6 +797,8 @@ with tab_main:
                     mapping[key] = None if sel == "(nessuna)" else sel
 
             values = {}
+            value_widget_keys = {}
+            invalid_field_issues = []
             role_data = {}
             premise_errors = {"invalid": False}
             if roles and not selected_archive:
@@ -771,6 +865,7 @@ with tab_main:
                             col = core.guess_column(base, person_columns, "fisica")
                             init = core.format_field_value(base, person.get(col) if col else None)
                             k = f"v_{rid}_{key}_{person.get('id', '')}{key_revision}"
+                        value_widget_keys[key] = k
                         if "PREMESSA" in core._norm(base).upper():
                             (
                                 rendered_value,
@@ -781,6 +876,8 @@ with tab_main:
                                 base, label, init, k, premise_by_id
                             )
                             premise_errors["invalid"] |= invalid_premise
+                            if invalid_premise:
+                                invalid_field_issues.append((label, k))
                             if save_clicked:
                                 _open_premise_save_dialog(premise_text)
                         else:
@@ -809,13 +906,45 @@ with tab_main:
             visible_main_keys = [key for key in main_keys if not core.is_anagraphic_field(key)]
             anagraphic_main_keys = [key for key in main_keys if core.is_anagraphic_field(key)]
             for key in visible_main_keys:
+                value_widget_keys[key] = f"v_{rid}_{key}{_field_widget_revision(key)}"
                 values[key], invalid = _render_document_field(key, rec, mapping, rid)
                 invalid_commission |= invalid
+                if invalid:
+                    invalid_field_issues.append(
+                        (key.replace("_", " ").capitalize(), value_widget_keys[key])
+                    )
             if anagraphic_main_keys:
                 with st.expander("Dati anagrafici", expanded=False):
                     for key in anagraphic_main_keys:
+                        value_widget_keys[key] = f"v_{rid}_{key}{_field_widget_revision(key)}"
                         values[key], invalid = _render_document_field(key, rec, mapping, rid)
                         invalid_commission |= invalid
+                        if invalid:
+                            invalid_field_issues.append(
+                                (key.replace("_", " ").capitalize(), value_widget_keys[key])
+                            )
+
+            _render_field_issues(
+                "Valori non validi da correggere",
+                invalid_field_issues,
+                "Usa i collegamenti per raggiungere direttamente i campi.",
+                error=True,
+            )
+            missing_value_issues = [
+                (
+                    key.replace("_", " ").capitalize(),
+                    value_widget_keys[key],
+                )
+                for key in placeholders
+                if not str(values.get(key, "") or "").strip()
+                and key in value_widget_keys
+            ]
+            _render_field_issues(
+                "Segnaposto vuoti",
+                missing_value_issues,
+                "Un campo vuoto non è necessariamente obbligatorio; il documento "
+                "può comunque essere generato.",
+            )
 
             if not placeholders:
                 st.warning("Nessun segnaposto trovato (es. [NOME], [COGNOME]).")
@@ -1012,6 +1141,8 @@ with tab_bulk:
             ]
             st.session_state.setdefault("mass_phase", 1)
             if st.session_state["mass_phase"] == 1:
+                st.progress(1 / 3, text="Fase 1 di 3 — Seleziona le anagrafiche")
+                st.caption("Scegli le persone e le società per cui creare i mandati.")
                 st.session_state["mass_pending_records"] = [
                     option
                     for option in st.session_state.get(
@@ -1021,8 +1152,9 @@ with tab_bulk:
                     if option in bulk_records
                 ]
                 with st.form("mass_record_selection"):
+                    _field_anchor("mass_pending_records")
                     st.multiselect(
-                        "Fase 1 — Seleziona le anagrafiche",
+                        "Anagrafiche da includere",
                         list(bulk_records),
                         format_func=lambda option: (
                             f"{core.CUSTOMER_TYPES[bulk_records[option][0]]} — "
@@ -1038,6 +1170,12 @@ with tab_bulk:
                     selected_keys = st.session_state["mass_pending_records"]
                     if not selected_keys:
                         st.error("Seleziona almeno un'anagrafica.")
+                        _render_field_issues(
+                            "Seleziona almeno un'anagrafica",
+                            [("Anagrafiche da includere", "mass_pending_records")],
+                            "Apri il selettore e scegli una o più persone.",
+                            error=True,
+                        )
                     else:
                         st.session_state["mass_selected_records"] = selected_keys
                         st.session_state.setdefault("mass_role_data", {})
@@ -1100,6 +1238,7 @@ with tab_bulk:
                         st.rerun()
 
             elif st.session_state["mass_phase"] == 2:
+                st.progress(2 / 3, text="Fase 2 di 3 — Completa ruoli e incarichi")
                 selected_keys = [
                     option for option in st.session_state.get("mass_selected_records", [])
                     if option in bulk_records
@@ -1140,6 +1279,7 @@ with tab_bulk:
                                 saved = role_data.get(role, {})
                                 st.markdown(f"**{core.role_label(role)}**")
                                 person_key = f"mass_person_{company_key}_{role}"
+                                _field_anchor(person_key)
                                 st.selectbox(
                                     "Persona",
                                     list(range(len(people))),
@@ -1154,6 +1294,7 @@ with tab_bulk:
                                     key=person_key,
                                 )
                                 role_key = f"mass_role_{company_key}_{role}"
+                                _field_anchor(role_key)
                                 saved_role = saved.get("role", "")
                                 role_options = [""] + core.CARICHE + ["Altro"]
                                 default_role = (
@@ -1173,6 +1314,9 @@ with tab_bulk:
                                     key=role_key,
                                 )
                                 if role_value == "Altro":
+                                    _field_anchor(
+                                        f"mass_role_other_{company_key}_{role}"
+                                    )
                                     st.text_input(
                                         "Specifica la carica",
                                         value=saved_role,
@@ -1202,6 +1346,7 @@ with tab_bulk:
                                 saved = role_data.get(role, {})
                                 st.markdown(f"**{core.role_label(role)} (socio)**")
                                 person_key = f"mass_person_{company_key}_{role}"
+                                _field_anchor(person_key)
                                 st.selectbox(
                                     "Persona",
                                     list(range(len(people))),
@@ -1220,6 +1365,7 @@ with tab_bulk:
                                     st.session_state[percentage_key] = saved.get(
                                         "percentage", "0,00%"
                                     )
+                                _field_anchor(percentage_key)
                                 st.text_input(
                                     "Percentuale di titolarità",
                                     key=percentage_key,
@@ -1246,7 +1392,7 @@ with tab_bulk:
                         args=(percentage_keys, percentage_error_key),
                     )
                     next_to_manual = st.form_submit_button(
-                        "Conferma anagrafiche e passa alla fase 2",
+                        "Conferma i ruoli e passa alla fase 3",
                         type="primary",
                         disabled=not selected_keys,
                         on_click=_normalize_percentage_widgets,
@@ -1290,6 +1436,7 @@ with tab_bulk:
                     st.rerun()
                 if next_to_manual:
                     errors = []
+                    validation_issues = []
                     mandates = []
                     for option in selected_keys:
                         customer_type, record = bulk_records[option]
@@ -1318,11 +1465,30 @@ with tab_bulk:
                             for role in expected_roles:
                                 role_data = roles.get(role)
                                 if not role_data or not role_data.get("person"):
+                                    validation_issues.append(
+                                        (
+                                            f"{core.record_label(customer_type, record)} — "
+                                            f"{core.role_label(role)}",
+                                            f"mass_person_{company_key}_{role}",
+                                        )
+                                    )
                                     errors.append(
                                         f"{core.record_label(customer_type, record)}: "
                                         f"salva {core.role_label(role).lower()}."
                                     )
                                 elif role.startswith("LR") and not role_data.get("role"):
+                                    role_widget_key = f"mass_role_{company_key}_{role}"
+                                    if st.session_state.get(role_widget_key) == "Altro":
+                                        role_widget_key = (
+                                            f"mass_role_other_{company_key}_{role}"
+                                        )
+                                    validation_issues.append(
+                                        (
+                                            f"{core.record_label(customer_type, record)} — "
+                                            f"carica di {core.role_label(role)}",
+                                            role_widget_key,
+                                        )
+                                    )
                                     errors.append(
                                         f"{core.record_label(customer_type, record)}: "
                                         f"inserisci la carica per "
@@ -1336,6 +1502,13 @@ with tab_bulk:
                                             )
                                         )
                                     except ValueError:
+                                        validation_issues.append(
+                                            (
+                                                f"{core.record_label(customer_type, record)} — "
+                                                f"percentuale di {core.role_label(role)}",
+                                                f"mass_percentage_{company_key}_{role}",
+                                            )
+                                        )
                                         errors.append(
                                             f"{core.record_label(customer_type, record)}: "
                                             f"completa la percentuale di "
@@ -1344,6 +1517,12 @@ with tab_bulk:
                         mandates.append(mandate)
                     if errors:
                         st.error(" ".join(errors))
+                        _render_field_issues(
+                            "Dati obbligatori da completare",
+                            validation_issues,
+                            "Usa i collegamenti per raggiungere direttamente i campi.",
+                            error=True,
+                        )
                     else:
                         saved_profiles = []
                         archive_save_errors = []
@@ -1416,13 +1595,14 @@ with tab_bulk:
                         st.session_state.pop("mass_archive", None)
                         st.rerun()
             else:
+                st.progress(1.0, text="Fase 3 di 3 — Completa i dati e genera i mandati")
                 mandates = st.session_state.get("mass_mandates", [])
                 if not mandates:
                     st.session_state["mass_phase"] = 1
                     st.rerun()
                 st.info(
-                    "Fase 2 — Inserisci le variabili specifiche per ciascun mandato. "
-                    "I dati anagrafici e gli incarichi vengono precompilati dalla fase 1."
+                    "Inserisci le variabili specifiche per ciascun mandato. "
+                    "I dati anagrafici e gli incarichi arrivano dalla fase 2."
                 )
                 if notice := st.session_state.pop("mass_archive_save_notice", ""):
                     st.success(notice)
@@ -1430,6 +1610,7 @@ with tab_bulk:
                     st.error(f"Salvataggio automatico nell'archivio non riuscito: {error}")
                 mass_values_by_mandate = []
                 invalid_bulk_fields = False
+                invalid_bulk_issues = []
                 for number, mandate in enumerate(mandates, 1):
                     customer_type = mandate["customer_type"]
                     record = mandate["record"]
@@ -1536,6 +1717,10 @@ with tab_bulk:
                                                 field_initials=saved_manual_values,
                                             )
                                             invalid_bulk_fields |= invalid_premise
+                                            if invalid_premise:
+                                                invalid_bulk_issues.append(
+                                                    (field_label, widget_key)
+                                                )
                                             if save_clicked:
                                                 premise_save_request = premise_text
                                         else:
@@ -1555,11 +1740,14 @@ with tab_bulk:
                                             )
                                         except ValueError as error:
                                             invalid_bulk_fields = True
+                                            invalid_bulk_issues.append(
+                                                (field_label, widget_key)
+                                            )
                                             st.error(f"{field_label}: {error}")
                                 else:
                                     st.caption("Il modello non contiene variabili manuali.")
                         back_to_roles = st.form_submit_button(
-                            "Torna alla fase 1 — LR e TE",
+                            "Torna alla fase 2 — LR e TE",
                             on_click=_save_mass_manual_values,
                             args=(manual_widget_keys,),
                         )
@@ -1569,6 +1757,18 @@ with tab_bulk:
                             type="primary",
                             disabled=invalid_bulk_fields or not mass_values_by_mandate,
                         )
+
+                _render_field_issues(
+                    "Valori non validi da correggere",
+                    invalid_bulk_issues,
+                    "Usa i collegamenti per raggiungere direttamente i campi.",
+                    error=True,
+                )
+                if invalid_bulk_fields and not invalid_bulk_issues:
+                    st.error(
+                        "Non è possibile generare i documenti: controlla gli errori "
+                        "mostrati nei campi o verifica che tutti i modelli siano validi."
+                    )
 
                 if premise_save_request is not None:
                     _open_premise_save_dialog(premise_save_request)
@@ -1620,7 +1820,8 @@ with tab_bulk:
                                     st.image(image, width="stretch")
                 with mass_left:
                     missing_required = []
-                    for _, _, _, values, label, manual_keys in mass_values_by_mandate:
+                    required_field_issues = []
+                    for mandate, _, _, values, label, manual_keys in mass_values_by_mandate:
                         premessa_keys = [
                             key for key in manual_keys
                             if "PREMESSA" in core._norm(key).upper()
@@ -1634,12 +1835,39 @@ with tab_bulk:
                             str(values.get(key, "")).strip() for key in premessa_keys
                         ):
                             missing.append("premessa")
+                            required_field_issues.extend(
+                                (
+                                    f"{label} — {key.replace('_', ' ').capitalize()}",
+                                    (
+                                        f"mass_value_"
+                                        f"{core._norm(core.record_identity(mandate['record']))}_"
+                                        f"{core._norm(key)}"
+                                    ),
+                                )
+                                for key in premessa_keys
+                            )
                         if commission_keys and not any(
                             str(values.get(key, "")).strip() for key in commission_keys
                         ):
                             missing.append("almeno una commissione")
+                            required_field_issues.extend(
+                                (
+                                    f"{label} — {key.replace('_', ' ').capitalize()}",
+                                    (
+                                        f"mass_value_"
+                                        f"{core._norm(core.record_identity(mandate['record']))}_"
+                                        f"{core._norm(key)}"
+                                    ),
+                                )
+                                for key in commission_keys
+                            )
                         if missing:
                             missing_required.append(f"{label}: {' e '.join(missing)}")
+                    _render_field_issues(
+                        "Campi obbligatori da completare",
+                        required_field_issues,
+                        "Compila almeno una premessa e/o una commissione dove richiesto.",
+                    )
                     if generate_clicked and missing_required:
                         st.error(
                             "Generazione bloccata. Compila i campi obbligatori:\n\n"
