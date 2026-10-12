@@ -1,5 +1,6 @@
 import base64
 import copy
+import difflib
 import functools
 import hashlib
 import html as _html
@@ -16,6 +17,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 
@@ -64,6 +66,14 @@ ARCHIVE_DEFAULT_DATABASE = Table(
     Column("filename", Text, nullable=False),
     Column("sha256", String(64), nullable=False),
     Column("content", LargeBinary, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+ARCHIVE_DRAFTS = Table(
+    "archive_mass_drafts",
+    ARCHIVE_METADATA,
+    Column("id", String(36), primary_key=True),
+    Column("name", Text, nullable=False),
+    Column("payload", JSON, nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
 )
 ARCHIVE_PREMISES = Table(
@@ -515,6 +525,247 @@ def delete_archive_premise(database_url, premise_id):
         )
     if result.rowcount != 1:
         raise KeyError("La premessa da eliminare non esiste più.")
+
+
+def list_mass_drafts(database_url):
+    engine = _archive_table(database_url)
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(
+                ARCHIVE_DRAFTS.c.id,
+                ARCHIVE_DRAFTS.c.name,
+                ARCHIVE_DRAFTS.c.payload,
+                ARCHIVE_DRAFTS.c.updated_at,
+            ).order_by(ARCHIVE_DRAFTS.c.updated_at.desc())
+        )
+        return [
+            {
+                "id": row.id,
+                "name": row.name,
+                "payload": row.payload,
+                "updated_at": row.updated_at,
+            }
+            for row in rows
+        ]
+
+
+def save_mass_draft(database_url, name, payload, draft_id=None):
+    name = str(name).strip()
+    if not name:
+        raise ValueError("Inserisci un nome per la bozza.")
+    payload = json.loads(json.dumps(payload, default=str))
+    engine = _archive_table(database_url)
+    with engine.begin() as connection:
+        if draft_id:
+            result = connection.execute(
+                update(ARCHIVE_DRAFTS)
+                .where(ARCHIVE_DRAFTS.c.id == draft_id)
+                .values(name=name, payload=payload, updated_at=func.now())
+            )
+            if result.rowcount == 1:
+                return draft_id
+        draft_id = str(uuid.uuid4())
+        connection.execute(
+            insert(ARCHIVE_DRAFTS).values(
+                id=draft_id, name=name, payload=payload, updated_at=func.now()
+            )
+        )
+    return draft_id
+
+
+def delete_mass_draft(database_url, draft_id):
+    engine = _archive_table(database_url)
+    with engine.begin() as connection:
+        connection.execute(ARCHIVE_DRAFTS.delete().where(ARCHIVE_DRAFTS.c.id == draft_id))
+
+
+# ---------- lista di controllo (Excel) ----------
+_FORM_TOKENS = {
+    "srl", "srls", "spa", "snc", "sas", "sapa", "ss", "scarl", "scpa", "soc", "coop",
+    "gmbh", "ag", "ug", "kg", "kgaa", "ohg", "gbr", "co",
+}
+_STOP_TOKENS = {"di", "in", "del", "della", "dello", "dei", "il", "la", "lo", "e", "a", "per", "da"}
+_ABBREVIATIONS = {
+    "cto": ["conto"], "ccto": ["conto", "corrente"], "cc": ["conto", "corrente"],
+    "aucap": ["aumento", "capitale"], "cap": ["capitale"], "soc": ["sociale"],
+    "fin": ["finanziamento"], "vers": ["versamento"], "comm": ["commissione"],
+}
+CHECKLIST_NAME_HEADERS = {
+    "cliente", "nominativo", "ragione sociale", "denominazione", "nome", "soggetto",
+    "societa", "intestatario", "anagrafica",
+}
+CHECKLIST_FISCAL_CODE_HEADERS = {"codice fiscale", "cf"}
+CHECKLIST_STATUS_HEADERS = {"stato"}
+
+
+def _fold_tokens(text):
+    text = unicodedata.normalize("NFKD", str(text or ""))
+    text = "".join(c for c in text if not unicodedata.combining(c)).lower()
+    text = re.sub(r"[./'’`]", "", text).replace("%", " percentuale ")
+    return re.findall(r"[a-z0-9]+", text)
+
+
+def fold_text(text):
+    return " ".join(_fold_tokens(text))
+
+
+def _name_keys(text):
+    tokens = _fold_tokens(text)
+    core_tokens = [t for t in tokens if t not in _FORM_TOKENS]
+    return " ".join(sorted(tokens)), " ".join(sorted(core_tokens or tokens))
+
+
+def _checklist_cell(cell):
+    if getattr(cell, "data_type", "") == "e":
+        return ""
+    value = cell.value
+    if value is None:
+        return ""
+    if isinstance(value, (datetime, date)):
+        return value.strftime("%d/%m/%Y")
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)) and "%" in str(cell.number_format):
+        return f"{(Decimal(str(value)) * 100).normalize():f}%"
+    return _cell(value)
+
+
+def _checklist_sheet_rows(data, filename):
+    if str(filename).lower().endswith(".xls"):
+        import xlrd
+
+        sheet = xlrd.open_workbook(file_contents=data).sheet_by_index(0)
+        rows = []
+        for index in range(sheet.nrows):
+            row = []
+            for cell in sheet.row(index):
+                if cell.ctype == xlrd.XL_CELL_DATE:
+                    row.append(
+                        xlrd.xldate_as_datetime(cell.value, sheet.book.datemode).strftime("%d/%m/%Y")
+                    )
+                elif cell.ctype in (xlrd.XL_CELL_ERROR, xlrd.XL_CELL_EMPTY):
+                    row.append("")
+                else:
+                    row.append(_cell(cell.value))
+            rows.append(row)
+        return rows
+    from openpyxl import load_workbook
+
+    sheet = load_workbook(io.BytesIO(data), data_only=True).worksheets[0]
+    return [[_checklist_cell(cell) for cell in row] for row in sheet.iter_rows()]
+
+
+def read_checklist(data, filename):
+    """Legge una lista di controllo: individua la riga di intestazione e restituisce
+    {"headers": [...], "rows": [{"row": numero riga Excel, "cells": [...]}]}."""
+    raw_rows = _checklist_sheet_rows(data, filename)
+    header_index = next(
+        (
+            index for index, row in enumerate(raw_rows[:30])
+            if sum(1 for c in row if c.strip() and not re.fullmatch(r"[\d.,%\s]+", c)) >= 3
+        ),
+        None,
+    )
+    if header_index is None:
+        raise ValueError("Impossibile trovare la riga delle intestazioni nel foglio.")
+    headers = [c.strip() for c in raw_rows[header_index]]
+    width = len(headers)
+    rows = []
+    for index, row in enumerate(raw_rows[header_index + 1:], header_index + 2):
+        cells = [c.strip() for c in row[:width]] + [""] * (width - len(row))
+        if any(cells):
+            rows.append({"row": index, "cells": cells})
+    return {"headers": headers, "rows": rows}
+
+
+def find_checklist_column(headers, wanted):
+    for index, header in enumerate(headers):
+        if fold_text(header) in wanted:
+            return index
+    return None
+
+
+def is_checklist_total_row(name):
+    tokens = _fold_tokens(name)
+    return bool(tokens) and tokens[0] in {"totale", "totali", "total"}
+
+
+def build_record_index(candidates):
+    """candidates: lista di (option, record_type, record, label)."""
+    index = {"cf": {}, "name": {}, "core": {}, "label": {}}
+    for option, record_type, record, label in candidates:
+        identity = record_identity(record)
+        if identity.startswith("cf:"):
+            index["cf"].setdefault(identity[3:], []).append(option)
+        full_key, core_key = _name_keys(label)
+        index["name"].setdefault(full_key, []).append(option)
+        index["core"].setdefault(core_key, []).append(option)
+        index["label"][option] = label
+    return index
+
+
+def match_checklist_row(index, name, fiscal_code=""):
+    """Esito: ("ok", [opzione]), ("ambiguous", [opzioni]), ("similar", [opzioni]) o ("missing", [])."""
+    code = str(fiscal_code or "").strip().upper()
+    if code and code in index["cf"]:
+        options = index["cf"][code]
+        return ("ok", options) if len(options) == 1 else ("ambiguous", options)
+    full_key, core_key = _name_keys(name)
+    if not full_key:
+        return ("missing", [])
+    for table, key in (("name", full_key), ("core", core_key)):
+        options = index[table].get(key, [])
+        if len(options) == 1:
+            return "ok", options
+        if len(options) > 1:
+            return "ambiguous", options
+    close = difflib.get_close_matches(core_key, list(index["core"]), n=3, cutoff=0.8)
+    options = [option for key in close for option in index["core"][key]]
+    return ("similar", options) if options else ("missing", [])
+
+
+def auto_map_columns(targets, headers):
+    """Associa a ogni etichetta (segnaposto/campo premessa) la colonna dal nome più simile.
+
+    Restituisce {target: indice colonna}; ogni colonna è usata al massimo una volta."""
+
+    def significant(text):
+        tokens = []
+        for token in _fold_tokens(text):
+            tokens.extend(_ABBREVIATIONS.get(token, [token]))
+        return [t for t in tokens if t not in _STOP_TOKENS]
+
+    scored = []
+    for target in targets:
+        target_tokens = significant(target)
+        for column, header in enumerate(headers):
+            header_tokens = significant(header)
+            if not target_tokens or not header_tokens:
+                continue
+            if target_tokens == header_tokens:
+                score = 1.0
+            elif sorted(target_tokens) == sorted(header_tokens):
+                score = 0.97
+            else:
+                score = difflib.SequenceMatcher(
+                    None, " ".join(target_tokens), " ".join(header_tokens)
+                ).ratio()
+            if score >= 0.8:
+                scored.append((score, target, column))
+    mapping, used = {}, set()
+    for score, target, column in sorted(scored, key=lambda item: -item[0]):
+        if target not in mapping and column not in used:
+            mapping[target] = column
+            used.add(column)
+    return mapping
+
+
+def checklist_value(name, raw):
+    """Valore di cella pronto per un campo: le percentuali di un campo «percentuale» perdono il simbolo."""
+    value = str(raw or "").strip()
+    if value.endswith("%") and "PERCENTUAL" in _norm(name).upper():
+        return value[:-1].strip()
+    return value
 
 
 # ---------- conversione .doc <-> .docx ----------

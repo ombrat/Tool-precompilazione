@@ -427,6 +427,327 @@ def invalidate_session_premises_cache():
     st.session_state.pop("archive_premises_cache", None)
 
 
+def session_mass_drafts(database_url):
+    cached = st.session_state.get("mass_drafts_cache")
+    if cached is None or cached["database_url"] != database_url:
+        cached = {
+            "database_url": database_url,
+            "drafts": core.list_mass_drafts(database_url),
+        }
+        st.session_state["mass_drafts_cache"] = cached
+    return cached["drafts"]
+
+
+def invalidate_session_drafts_cache():
+    st.session_state.pop("mass_drafts_cache", None)
+
+
+_MASS_DRAFT_COUNT_PREFIXES = ("mass_lr_count_", "mass_te_count_")
+
+
+def _mass_draft_payload():
+    state = st.session_state
+    return {
+        "version": 1,
+        "phase": state.get("mass_phase", 1),
+        "selected_records": state.get("mass_selected_records", []),
+        "pending_records": state.get("mass_pending_records", []),
+        "role_data": state.get("mass_role_data", {}),
+        "manual_values": state.get("mass_manual_values", {}),
+        "mandates": state.get("mass_mandates", []),
+        "counts": {
+            key: value for key, value in state.items()
+            if key.startswith(_MASS_DRAFT_COUNT_PREFIXES)
+        },
+    }
+
+
+def _restore_mass_draft(payload, draft):
+    state = st.session_state
+    for key in [
+        key for key in state
+        if key.startswith(("mass_value_", "mass_person_", "mass_role_", "mass_percentage_"))
+        or key.startswith(_MASS_DRAFT_COUNT_PREFIXES)
+    ]:
+        del state[key]
+    state["mass_phase"] = payload.get("phase", 1)
+    state["mass_selected_records"] = payload.get("selected_records", [])
+    state["mass_pending_records"] = payload.get(
+        "pending_records", payload.get("selected_records", [])
+    )
+    state["mass_role_data"] = payload.get("role_data", {})
+    state["mass_manual_values"] = payload.get("manual_values", {})
+    state["mass_mandates"] = payload.get("mandates", [])
+    state.update(payload.get("counts", {}))
+    state.pop("mass_archive", None)
+    state["mass_draft_id"] = draft["id"]
+    state["mass_draft_name"] = draft["name"]
+
+
+def _save_mass_draft(name):
+    state = st.session_state
+    try:
+        draft_id = core.save_mass_draft(
+            archive_database_url,
+            name,
+            _mass_draft_payload(),
+            state.get("mass_draft_id"),
+        )
+    except Exception as error:
+        st.error(f"Impossibile salvare la bozza: {error}")
+        return
+    state["mass_draft_id"] = draft_id
+    state["mass_draft_name"] = str(name).strip()
+    invalidate_session_drafts_cache()
+    st.success(f"Bozza «{str(name).strip()}» salvata.")
+
+
+def _render_draft_save_controls(key_prefix, on_click=None, args=None):
+    """Nome e pulsante di salvataggio bozza da usare dentro un form."""
+    if not archive_database_url or archive_error:
+        st.caption("Salvataggio bozza non disponibile: archivio non configurato.")
+        return False
+    st.text_input(
+        "Nome della bozza",
+        value=st.session_state.get("mass_draft_name", ""),
+        key=f"{key_prefix}_draft_name",
+    )
+    return st.form_submit_button(
+        "💾 Salva bozza",
+        key=f"{key_prefix}_draft_save",
+        on_click=on_click,
+        args=args,
+    )
+
+
+OUTPUT_FORMATS = ["Documento Word", "Word e PDF", "Solo PDF"]
+
+
+def _render_output_format_selector(key):
+    return st.radio(
+        "Formato di output",
+        OUTPUT_FORMATS,
+        horizontal=True,
+        key=key,
+        help="Il PDF è ottenuto convertendo il documento compilato.",
+    )
+
+
+def _template_manual_keys(placeholders):
+    """Segnaposto da compilare a mano (non provenienti dall'anagrafica o dai ruoli)."""
+    keys = []
+    for key in placeholders:
+        base, role = core.split_role(key)
+        normalized_base = core._norm(base).upper()
+        if role:
+            if normalized_base in {"CARICA", "RUOLO", "RUOLO_SOCIETARIO"}:
+                continue
+            if "PERCENT" in normalized_base or core.is_anagraphic_field(key):
+                continue
+        elif core.is_anagraphic_field(key):
+            continue
+        keys.append(key)
+    return keys
+
+
+def _render_checklist_import(bulk_records, mass_templates):
+    manual_keys_by_type = {
+        customer_type: _template_manual_keys(template["placeholders"])
+        for customer_type, template in mass_templates.items()
+    }
+
+    def is_premise_key(key):
+        return "PREMESSA" in core._norm(key).upper()
+
+    other_keys = list(
+        dict.fromkeys(
+            key for keys in manual_keys_by_type.values() for key in keys
+            if not is_premise_key(key)
+        )
+    )
+    with st.expander("📥 Importa da lista di controllo (Excel)", expanded=False):
+        st.caption(
+            "Carica la lista interna: il programma cerca ogni nominativo nell'anagrafica "
+            "(riconoscendo persona fisica o giuridica), collega le colonne ai campi della "
+            "premessa e alle commissioni e precompila i mandati. Le righe TOTALE e le colonne "
+            "senza corrispondenza vengono ignorate. Legale rappresentante e titolari effettivi "
+            "restano quelli delle schede archiviate."
+        )
+        uploaded = st.file_uploader(
+            "Lista di controllo (.xlsx / .xls)", type=["xlsx", "xls"], key="mass_checklist"
+        )
+        if not uploaded:
+            return
+        try:
+            checklist = core.read_checklist(uploaded.getvalue(), uploaded.name)
+        except Exception as error:
+            st.error(f"Impossibile leggere la lista: {error}")
+            return
+        headers = checklist["headers"]
+        name_col = core.find_checklist_column(headers, core.CHECKLIST_NAME_HEADERS)
+        cf_col = core.find_checklist_column(headers, core.CHECKLIST_FISCAL_CODE_HEADERS)
+        status_col = core.find_checklist_column(headers, core.CHECKLIST_STATUS_HEADERS)
+        if name_col is None and cf_col is None:
+            st.error(
+                "Non trovo la colonna del nominativo: usa un'intestazione come "
+                "«Cliente», «Nominativo» o «Ragione sociale» (oppure «Codice fiscale»)."
+            )
+            return
+        file_id = hashlib.sha256(uploaded.getvalue()).hexdigest()[:10]
+
+        premise_ids = [None] + list(premise_by_id)
+        premise_id = st.selectbox(
+            "Premessa da applicare a tutti i mandati",
+            premise_ids,
+            format_func=lambda value: (
+                "Nessuna (lascia la premessa vuota)" if value is None
+                else premise_by_id[value]["name"]
+            ),
+            key=f"cl_premise_{file_id}",
+            disabled=not archive_premises,
+        )
+        premise_text = premise_by_id[premise_id]["content"] if premise_id else ""
+        premise_labels = core.find_premise_fields(premise_text)
+
+        targets = {}
+        for label in [*other_keys, *premise_labels]:
+            targets.setdefault(core._norm(label).upper(), label)
+        auto_mapping = core.auto_map_columns(list(targets.values()), headers)
+        column_options = [None] + [
+            index for index, header in enumerate(headers) if header
+        ]
+        mapping = {}
+        with st.expander("Corrispondenza colonne ↔ campi", expanded=True):
+            if not targets:
+                st.caption("I modelli e la premessa scelta non hanno campi da compilare.")
+            for norm_name, label in targets.items():
+                default = auto_mapping.get(label)
+                chosen = st.selectbox(
+                    label.replace("_", " ").capitalize(),
+                    column_options,
+                    index=column_options.index(default),
+                    format_func=lambda index: (
+                        "— non importare —" if index is None else headers[index]
+                    ),
+                    key=f"cl_map_{file_id}_{premise_id}_{norm_name}",
+                )
+                if chosen is not None:
+                    mapping[norm_name] = chosen
+
+        status_filter = None
+        if status_col is not None:
+            statuses = list(dict.fromkeys(
+                row["cells"][status_col] for row in checklist["rows"]
+                if row["cells"][status_col]
+            ))
+            if statuses:
+                status_filter = set(st.multiselect(
+                    f"Importa solo le righe con «{headers[status_col]}»",
+                    statuses,
+                    default=statuses,
+                    key=f"cl_status_{file_id}",
+                ))
+
+        candidates = [
+            (option, customer_type, record, core.record_label(customer_type, record))
+            for option, (customer_type, record) in bulk_records.items()
+        ]
+        index = core.build_record_index(candidates)
+        report, matched = [], {}
+        for row in checklist["rows"]:
+            cells = row["cells"]
+            name = cells[name_col] if name_col is not None else ""
+            fiscal_code = cells[cf_col] if cf_col is not None else ""
+            if (not name and not fiscal_code) or core.is_checklist_total_row(name):
+                continue
+            if status_filter is not None and status_col is not None and (
+                cells[status_col] not in status_filter
+            ):
+                continue
+            outcome, options = core.match_checklist_row(index, name, fiscal_code)
+            found_type, found_label, note = "", "", ""
+            if outcome == "ok":
+                option = options[0]
+                found_type = (
+                    "Persona giuridica" if bulk_records[option][0] == "giuridica"
+                    else "Persona fisica"
+                )
+                found_label = index["label"][option]
+                if option in matched:
+                    note = "Duplicato: riga ignorata"
+                else:
+                    matched[option] = cells
+                    note = "✅ Trovato"
+            elif outcome == "ambiguous":
+                note = f"⚠️ {len(options)} anagrafiche omonime: selezionala a mano"
+            elif outcome == "similar":
+                note = "⚠️ Non trovato, simile a: " + ", ".join(
+                    index["label"][option] for option in options
+                )
+            else:
+                note = "❌ Non presente nell'anagrafica (o manca il modello del tipo)"
+            report.append(
+                {
+                    "Riga": row["row"],
+                    "Nominativo in lista": name or fiscal_code,
+                    "Tipo": found_type,
+                    "Anagrafica trovata": found_label,
+                    "Esito": note,
+                }
+            )
+        if report:
+            st.dataframe(report, hide_index=True, width="stretch")
+        unused = [
+            header for column, header in enumerate(headers)
+            if header and column not in mapping.values()
+            and column not in (name_col, cf_col, status_col)
+        ]
+        if unused:
+            st.caption("Colonne non utilizzate: " + ", ".join(unused))
+        missing_targets = [label for norm_name, label in targets.items() if norm_name not in mapping]
+        if missing_targets:
+            st.caption(
+                "Campi senza colonna (da compilare a mano): "
+                + ", ".join(label.replace("_", " ").lower() for label in missing_targets)
+            )
+        if not matched:
+            st.warning("Nessuna riga corrisponde alle anagrafiche disponibili.")
+            return
+        if st.button(f"Importa {len(matched)} mandati", type="primary", key=f"cl_apply_{file_id}"):
+            saved_values = st.session_state.setdefault("mass_manual_values", {})
+            for option, cells in matched.items():
+                customer_type, record = bulk_records[option]
+                record_key = core._norm(core.record_identity(record))
+                prefix = f"mass_value_{record_key}_"
+                for state_key in [k for k in st.session_state if k.startswith(prefix)]:
+                    del st.session_state[state_key]
+                for state_key in [k for k in saved_values if k.startswith(prefix)]:
+                    del saved_values[state_key]
+                manual_keys = manual_keys_by_type[customer_type]
+                for key in manual_keys:
+                    widget_key = f"{prefix}{core._norm(key)}"
+                    if is_premise_key(key):
+                        if premise_text:
+                            saved_values[widget_key] = premise_text
+                        for label in premise_labels:
+                            column = mapping.get(core._norm(label).upper())
+                            if column is not None and cells[column]:
+                                saved_values[
+                                    f"{widget_key}_premise_field_{core._norm(label)}"
+                                ] = core.checklist_value(label, cells[column])
+                    else:
+                        column = mapping.get(core._norm(key).upper())
+                        if column is not None and cells[column]:
+                            saved_values[widget_key] = core.checklist_value(
+                                key, cells[column]
+                            )
+            st.session_state["mass_pending_records"] = list(matched)
+            st.success(
+                f"{len(matched)} anagrafiche selezionate e precompilate: controlla "
+                "l'elenco qui sotto e conferma la selezione."
+            )
+
+
 def _normalize_percentage_widgets(widget_keys, error_key):
     errors = []
     for widget_key in widget_keys:
@@ -930,11 +1251,19 @@ with tab_main:
                             invalidate_session_profiles_cache()
                             st.success("Anagrafica salvata nell'archivio.")
 
+            output_format = _render_output_format_selector("single_output_format")
             if st.button("Genera documento", type="primary", disabled=invalid_commission):
                 fields = [{"name": k, "tokens": t} for k, t in placeholders.items()]
                 with st.spinner("Generazione..."):
                     out = core.render(data, fields, values)
-                    st.session_state["out"] = core.convert(out, "docx", "doc") if fmt == "doc" else out
+                    st.session_state["out"] = (
+                        None if output_format == "Solo PDF"
+                        else core.convert(out, "docx", "doc") if fmt == "doc" else out
+                    )
+                    st.session_state["out_pdf"] = (
+                        core.convert(out, "docx", "pdf")
+                        if output_format != "Documento Word" else None
+                    )
                 if (
                     ctype == "giuridica"
                     and rec
@@ -978,6 +1307,12 @@ with tab_main:
                     file_name=f"{source_name.rsplit('.', 1)[0]}_compilato.{fmt}",
                     mime="application/msword" if fmt == "doc"
                     else "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            if st.session_state.get("out_pdf"):
+                st.download_button(
+                    "Scarica PDF", st.session_state["out_pdf"],
+                    file_name=f"{source_name.rsplit('.', 1)[0]}_compilato.pdf",
+                    mime="application/pdf",
                 )
 
         with right:
@@ -1079,10 +1414,62 @@ with tab_bulk:
                     )
                 ) == "fisica"
             ]
+            with st.expander(
+                "📂 Bozze salvate"
+                + (
+                    f" — in uso: {st.session_state['mass_draft_name']}"
+                    if st.session_state.get("mass_draft_name") else ""
+                ),
+                expanded=False,
+            ):
+                if not archive_database_url:
+                    st.caption("Configura ARCHIVE_DATABASE_URL per salvare e riprendere le bozze.")
+                elif archive_error:
+                    st.caption(f"Archivio non disponibile: {archive_error}")
+                else:
+                    try:
+                        mass_drafts = session_mass_drafts(archive_database_url)
+                    except Exception as error:
+                        mass_drafts = []
+                        st.error(f"Impossibile caricare le bozze: {error}")
+                    if not mass_drafts:
+                        st.caption(
+                            "Nessuna bozza salvata. Usa «Salva bozza» in una qualsiasi fase."
+                        )
+                    else:
+                        draft_by_id = {draft["id"]: draft for draft in mass_drafts}
+                        chosen_draft_id = st.selectbox(
+                            "Bozza",
+                            list(draft_by_id),
+                            format_func=lambda draft_id: (
+                                f"{draft_by_id[draft_id]['name']} — "
+                                f"{draft_by_id[draft_id]['updated_at']:%d/%m/%Y %H:%M}"
+                            ),
+                            key="mass_draft_choice",
+                        )
+                        resume_col, delete_col = st.columns(2)
+                        if resume_col.button("Riprendi bozza", type="primary", key="mass_draft_resume"):
+                            _restore_mass_draft(
+                                draft_by_id[chosen_draft_id]["payload"],
+                                draft_by_id[chosen_draft_id],
+                            )
+                            st.rerun()
+                        if delete_col.button("Elimina bozza", key="mass_draft_delete"):
+                            try:
+                                core.delete_mass_draft(archive_database_url, chosen_draft_id)
+                            except Exception as error:
+                                st.error(f"Impossibile eliminare la bozza: {error}")
+                            else:
+                                if st.session_state.get("mass_draft_id") == chosen_draft_id:
+                                    st.session_state.pop("mass_draft_id", None)
+                                    st.session_state.pop("mass_draft_name", None)
+                                invalidate_session_drafts_cache()
+                                st.rerun()
             st.session_state.setdefault("mass_phase", 1)
             if st.session_state["mass_phase"] == 1:
                 st.progress(1 / 3, text="Fase 1 di 3 — Seleziona le anagrafiche")
                 st.caption("Scegli le persone e le società per cui creare i mandati.")
+                _render_checklist_import(bulk_records, mass_templates)
                 st.session_state["mass_pending_records"] = [
                     option
                     for option in st.session_state.get(
@@ -1106,6 +1493,9 @@ with tab_bulk:
                         "Conferma anagrafiche selezionate",
                         type="primary",
                     )
+                    draft_save_clicked = _render_draft_save_controls("mass_p1")
+                if draft_save_clicked:
+                    _save_mass_draft(st.session_state["mass_p1_draft_name"])
                 if selection_submitted:
                     selected_keys = st.session_state["mass_pending_records"]
                     if not selected_keys:
@@ -1338,9 +1728,16 @@ with tab_bulk:
                         on_click=_normalize_percentage_widgets,
                         args=(percentage_keys, percentage_error_key),
                     )
+                    draft_save_clicked = _render_draft_save_controls(
+                        "mass_p2",
+                        on_click=_normalize_percentage_widgets,
+                        args=(percentage_keys, percentage_error_key),
+                    )
 
-                if back_to_selection or next_to_manual or add_or_remove:
+                if back_to_selection or next_to_manual or add_or_remove or draft_save_clicked:
                     _save_mass_role_widgets(selected_corporates, people)
+                if draft_save_clicked:
+                    _save_mass_draft(st.session_state["mass_p2_draft_name"])
                 if add_or_remove:
                     action, option, removed_role = add_or_remove
                     company_key = core._norm(option)
@@ -1623,6 +2020,7 @@ with tab_bulk:
                 premise_save_request = None
                 mass_left, mass_right = st.columns([2, 3], gap="large")
                 with mass_left:
+                    mass_output_format = _render_output_format_selector("mass_output_format")
                     with st.form("mass_values_form"):
                         for (
                             mandate, template, placeholders, values, label, manual_keys
@@ -1692,6 +2090,11 @@ with tab_bulk:
                             args=(manual_widget_keys,),
                         )
                         st.form_submit_button("Aggiorna anteprima")
+                        draft_save_clicked = _render_draft_save_controls(
+                            "mass_p3",
+                            on_click=_save_mass_manual_values,
+                            args=(manual_widget_keys,),
+                        )
                         generate_clicked = st.form_submit_button(
                             "Genera i mandati",
                             type="primary",
@@ -1712,6 +2115,9 @@ with tab_bulk:
 
                 if premise_save_request is not None:
                     _open_premise_save_dialog(premise_save_request)
+
+                if draft_save_clicked:
+                    _save_mass_draft(st.session_state["mass_p3_draft_name"])
 
                 if back_to_roles:
                     st.session_state["mass_phase"] = 2
@@ -1820,36 +2226,50 @@ with tab_bulk:
                     ):
                         documents = []
                         used_names = set()
+                        progress = st.progress(0.0, text="Generazione dei documenti...")
                         with st.spinner("Generazione dei documenti..."):
-                            for (
+                            for position, (
                                 mandate, template, placeholders, values, label, _
-                            ) in mass_values_by_mandate:
+                            ) in enumerate(mass_values_by_mandate, 1):
                                 fields = [
                                     {"name": key, "tokens": tokens}
                                     for key, tokens in placeholders.items()
                                 ]
-                                output = core.render(template["docx"], fields, values)
-                                extension = template["format"]
-                                if extension == "doc":
-                                    output = core.convert(output, "docx", "doc")
+                                docx_output = core.render(template["docx"], fields, values)
                                 filename_base = core._norm(label).replace("_", " ") or "anagrafica"
-                                filename = f"Mandato {filename_base}.{extension}"
+                                stem = f"Mandato {filename_base}"
                                 duplicate = 2
-                                while filename.casefold() in used_names:
-                                    filename = (
-                                        f"Mandato {filename_base} ({duplicate}).{extension}"
-                                    )
+                                while f"{stem}.pdf".casefold() in used_names:
+                                    stem = f"Mandato {filename_base} ({duplicate})"
                                     duplicate += 1
-                                used_names.add(filename.casefold())
-                                documents.append((filename, output))
+                                used_names.add(f"{stem}.pdf".casefold())
+                                if mass_output_format != "Solo PDF":
+                                    extension = template["format"]
+                                    output = (
+                                        core.convert(docx_output, "docx", "doc")
+                                        if extension == "doc" else docx_output
+                                    )
+                                    documents.append((f"{stem}.{extension}", output))
+                                if mass_output_format != "Documento Word":
+                                    documents.append(
+                                        (f"{stem}.pdf", core.convert(docx_output, "docx", "pdf"))
+                                    )
+                                progress.progress(
+                                    position / len(mass_values_by_mandate),
+                                    text=f"Generati {position} di {len(mass_values_by_mandate)} mandati",
+                                )
+                        progress.empty()
                         st.session_state["mass_archive"] = core.create_document_archive(
                             documents
                         )
-                        st.session_state["mass_archive_signature"] = mass_signature
+                        st.session_state["mass_archive_signature"] = (
+                            mass_signature + mass_output_format
+                        )
 
                     if (
                         st.session_state.get("mass_archive")
-                        and st.session_state.get("mass_archive_signature") == mass_signature
+                        and st.session_state.get("mass_archive_signature")
+                        == mass_signature + mass_output_format
                     ):
                         st.download_button(
                             "Scarica i mandati separati (ZIP)",
