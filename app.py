@@ -972,10 +972,36 @@ if page == "single":
             ctype = "giuridica"
             st.caption("Tipo cliente: Persona giuridica (impostato dalla scheda archiviata)")
         else:
-            ctype = st.radio(
-                "Tipo di cliente", list(core.CUSTOMER_TYPES),
-                format_func=core.CUSTOMER_TYPES.get, horizontal=True, key="customer_type",
-            )
+            single_options = []
+            try:
+                for option_type in core.CUSTOMER_TYPES:
+                    for option_index, option_record in enumerate(
+                        core.db_records(option_type, active_xls_content)
+                    ):
+                        code_column = core.guess_column(
+                            "CODICE_FISCALE", option_record.keys(), option_type
+                        )
+                        actual_type = core.classify_customer_type(
+                            option_record.get(code_column) if code_column else None
+                        )
+                        if actual_type in (None, option_type):
+                            single_options.append((option_type, option_record, option_index))
+            except Exception as error:
+                st.error(f"Errore database: {error}")
+            ctype = next(iter(core.CUSTOMER_TYPES))
+            single_choice = None
+            if single_options:
+                choice_index = st.selectbox(
+                    "Anagrafica",
+                    range(len(single_options)),
+                    format_func=lambda i: (
+                        f"{core.record_label(single_options[i][0], single_options[i][1])}"
+                        f" — {core.CUSTOMER_TYPES[single_options[i][0]]}"
+                    ),
+                    key="company_record",
+                )
+                single_choice = single_options[choice_index]
+                ctype = single_choice[0]
 
         with st.expander("Usa un documento locale al posto del modello Supabase"):
             up = st.file_uploader(
@@ -1101,20 +1127,14 @@ if page == "single":
                     rid = f"archive_{selected_archive['id']}"
                 else:
                     try:
-                        records = core.db_records(ctype, active_xls_content)
                         cols = core.db_columns(ctype, active_xls_content)
                     except Exception as e:
-                        records, cols = [], []
+                        cols = []
                         st.error(f"Errore database: {e}")
                     rec, rid = {}, "none"
-                    if records:
-                        idx = st.selectbox(
-                            "Anagrafica", range(len(records)),
-                            format_func=lambda i: core.record_label(ctype, records[i]),
-                            key="company_record",
-                        )
-                        rec = records[idx]
-                        rid = f"{ctype}_{rec.get('id', idx)}"
+                    if single_choice:
+                        rec = single_choice[1]
+                        rid = f"{ctype}_{rec.get('id', single_choice[2])}"
                         if ctype == "giuridica" and archive_database_url and not archive_error:
                             match = next(
                                 (p for p in archive_profiles
