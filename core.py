@@ -768,6 +768,35 @@ def checklist_value(name, raw):
     return value
 
 
+def is_share_cost_field(name):
+    tokens = [t for t in _fold_tokens(name) if t not in _STOP_TOKENS]
+    expanded = [w for t in tokens for w in _ABBREVIATIONS.get(t, [t])]
+    return (
+        bool({"costo", "prezzo"} & set(expanded))
+        and "capitale" in expanded
+        and "percentuale" not in expanded
+    )
+
+
+def nominal_capital_column(headers):
+    """Colonna del capitale sociale (valore nominale), esclusa la percentuale."""
+    for index, header in enumerate(headers):
+        if fold_text(header) == "capitale sociale":
+            return index
+    return None
+
+
+def checklist_cell_value(name, cells, column, headers):
+    """Valore di cella per un campo; se è il costo del capitale sociale e manca,
+    si assume l'acquisto al valore nominale."""
+    value = cells[column] if column is not None else ""
+    if not value and is_share_cost_field(name):
+        nominal = nominal_capital_column(headers)
+        if nominal is not None:
+            value = cells[nominal]
+    return value
+
+
 # ---------- conversione .doc <-> .docx ----------
 def _convert_with_word(data, src, dst):
     try:

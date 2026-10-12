@@ -213,48 +213,49 @@ def _apply_archived_premise(select_key, target_key, premises_by_id):
 
 def _render_premise_widget(
     name, label, initial, widget_key, premises_by_id, in_form=False,
-    field_initials=None,
+    field_initials=None, show_selector=True,
 ):
-    select_key = f"{widget_key}_archived_premise"
-    archive_ready = bool(archive_database_url and not premises_error)
-    if not archive_database_url:
-        premise_ids = [None]
-        unavailable_label = "Archivio non configurato"
-    elif premises_error:
-        premise_ids = [None]
-        unavailable_label = "Premesse non disponibili"
-    else:
-        premise_ids = [None] + list(premises_by_id)
-        unavailable_label = "Nessuna premessa salvata"
-    st.selectbox(
-        "Scegli una premessa salvata",
-        premise_ids,
-        format_func=lambda premise_id: (
-            (
-                "Seleziona una premessa"
-                if archive_ready
-                else unavailable_label
-            )
-            if premise_id is None
-            else premises_by_id[premise_id]["name"]
-        ),
-        key=select_key,
-        disabled=not archive_ready,
-        on_change=_apply_archived_premise if archive_ready and not in_form else None,
-        args=(select_key, widget_key, premises_by_id),
-    )
-    if in_form:
-        st.form_submit_button(
-            "Carica premessa selezionata",
-            key=f"{widget_key}_apply_archived_premise",
-            disabled=not archive_ready or len(premise_ids) < 2,
-            on_click=_apply_archived_premise,
+    if show_selector:
+        select_key = f"{widget_key}_archived_premise"
+        archive_ready = bool(archive_database_url and not premises_error)
+        if not archive_database_url:
+            premise_ids = [None]
+            unavailable_label = "Archivio non configurato"
+        elif premises_error:
+            premise_ids = [None]
+            unavailable_label = "Premesse non disponibili"
+        else:
+            premise_ids = [None] + list(premises_by_id)
+            unavailable_label = "Nessuna premessa salvata"
+        st.selectbox(
+            "Scegli una premessa salvata",
+            premise_ids,
+            format_func=lambda premise_id: (
+                (
+                    "Seleziona una premessa"
+                    if archive_ready
+                    else unavailable_label
+                )
+                if premise_id is None
+                else premises_by_id[premise_id]["name"]
+            ),
+            key=select_key,
+            disabled=not archive_ready,
+            on_change=_apply_archived_premise if archive_ready and not in_form else None,
             args=(select_key, widget_key, premises_by_id),
         )
-    if premises_error:
-        st.caption(f"Archivio delle premesse non disponibile: {premises_error}")
-    elif not archive_database_url:
-        st.caption("Configura ARCHIVE_DATABASE_URL per caricare o salvare premesse.")
+        if in_form:
+            st.form_submit_button(
+                "Carica premessa selezionata",
+                key=f"{widget_key}_apply_archived_premise",
+                disabled=not archive_ready or len(premise_ids) < 2,
+                on_click=_apply_archived_premise,
+                args=(select_key, widget_key, premises_by_id),
+            )
+        if premises_error:
+            st.caption(f"Archivio delle premesse non disponibile: {premises_error}")
+        elif not archive_database_url:
+            st.caption("Configura ARCHIVE_DATABASE_URL per caricare o salvare premesse.")
 
     value = _render_field_widget(name, label, initial, widget_key, multiline=True)
     premise_fields = core.find_premise_fields(value)
@@ -520,17 +521,21 @@ def _render_draft_save_controls(key_prefix, on_click=None, args=None):
     )
 
 
-OUTPUT_FORMATS = ["Documento Word", "Word e PDF", "Solo PDF"]
-
-
-def _render_output_format_selector(key):
-    return st.radio(
-        "Formato di output",
-        OUTPUT_FORMATS,
-        horizontal=True,
-        key=key,
-        help="Il PDF è ottenuto convertendo il documento compilato.",
+@st.dialog("Formato di generazione")
+def _format_dialog(confirmed_key):
+    choice = st.radio(
+        "Cosa vuoi generare?",
+        ["Solo PDF", "Documento Word", "Word e PDF"],
+        format_func=lambda option: {
+            "Solo PDF": "PDF",
+            "Documento Word": "Word",
+            "Word e PDF": "Entrambi (Word e PDF)",
+        }[option],
+        key=f"{confirmed_key}_choice",
     )
+    if st.button("Genera", type="primary", key=f"{confirmed_key}_confirm"):
+        st.session_state[confirmed_key] = choice
+        st.rerun()
 
 
 def _template_manual_keys(placeholders):
@@ -704,7 +709,20 @@ def _render_checklist_import(bulk_records, mass_templates):
         ]
         if unused:
             st.caption("Colonne non utilizzate: " + ", ".join(unused))
-        missing_targets = [label for norm_name, label in targets.items() if norm_name not in mapping]
+        nominal_column = core.nominal_capital_column(headers)
+        missing_targets = [
+            label for norm_name, label in targets.items()
+            if norm_name not in mapping
+            and not (nominal_column is not None and core.is_share_cost_field(label))
+        ]
+        if nominal_column is not None and any(
+            core.is_share_cost_field(label) and norm_name not in mapping
+            for norm_name, label in targets.items()
+        ):
+            st.caption(
+                "Costo del capitale sociale senza colonna: verrà usato il valore "
+                f"nominale («{headers[nominal_column]}»)."
+            )
         if missing_targets:
             st.caption(
                 "Campi senza colonna (da compilare a mano): "
@@ -731,16 +749,16 @@ def _render_checklist_import(bulk_records, mass_templates):
                             saved_values[widget_key] = premise_text
                         for label in premise_labels:
                             column = mapping.get(core._norm(label).upper())
-                            if column is not None and cells[column]:
+                            cell = core.checklist_cell_value(label, cells, column, headers)
+                            if cell:
                                 saved_values[
                                     f"{widget_key}_premise_field_{core._norm(label)}"
-                                ] = core.checklist_value(label, cells[column])
+                                ] = core.checklist_value(label, cell)
                     else:
                         column = mapping.get(core._norm(key).upper())
-                        if column is not None and cells[column]:
-                            saved_values[widget_key] = core.checklist_value(
-                                key, cells[column]
-                            )
+                        cell = core.checklist_cell_value(key, cells, column, headers)
+                        if cell:
+                            saved_values[widget_key] = core.checklist_value(key, cell)
             st.session_state["mass_pending_records"] = list(matched)
             st.success(
                 f"{len(matched)} anagrafiche selezionate e precompilate: controlla "
@@ -1017,7 +1035,9 @@ if page == "single":
             left, right = st.columns([2, 3], gap="large")
 
             with left:
-                st.subheader("Dati")
+                title_col, generate_col = st.columns([3, 1])
+                title_col.subheader("Dati")
+                generate_slot = generate_col.container()
                 if st.session_state.get("doc_archive_id") not in (
                     [None] + list(profile_by_id)
                 ):
@@ -1054,6 +1074,27 @@ if page == "single":
                                 st.rerun()
                     ctype = "giuridica"
                 roles = core.roles_for_customer_type(roles, ctype)
+                te_roles = sorted(
+                    (r for r in roles if r.startswith("TE")),
+                    key=lambda r: int(r[2:]) if r[2:].isdigit() else 0,
+                )
+                hidden_te_keys = []
+                if te_roles:
+                    te_scope = (
+                        selected_archive["id"] if selected_archive else "manual",
+                        ctype,
+                    )
+                    if st.session_state.get("doc_te_scope") != te_scope:
+                        st.session_state["doc_te_scope"] = te_scope
+                        st.session_state["doc_te_count"] = max(
+                            1,
+                            len(selected_archive["payload"].get("owners", []))
+                            if selected_archive else 1,
+                        )
+                    doc_te_count = min(st.session_state["doc_te_count"], len(te_roles))
+                    st.session_state["doc_te_count"] = doc_te_count
+                    for hidden_role in te_roles[doc_te_count:]:
+                        hidden_te_keys.extend(roles.pop(hidden_role))
                 if selected_archive:
                     rec = selected_archive["payload"]["company"]
                     cols = list(rec)
@@ -1207,6 +1248,21 @@ if page == "single":
                                 for key in anagraphic_role_keys:
                                     render_role_field(key)
 
+                for hidden_key in hidden_te_keys:
+                    values[hidden_key] = ""
+                if te_roles:
+                    te_add_col, te_remove_col = st.columns(2)
+                    if doc_te_count < len(te_roles) and te_add_col.button(
+                        "Aggiungi titolare effettivo", key="doc_add_te"
+                    ):
+                        st.session_state["doc_te_count"] = doc_te_count + 1
+                        st.rerun()
+                    if doc_te_count > 1 and te_remove_col.button(
+                        "Rimuovi ultimo titolare effettivo", key="doc_remove_te"
+                    ):
+                        st.session_state["doc_te_count"] = doc_te_count - 1
+                        st.rerun()
+
                 st.markdown("**Campi del documento**")
                 invalid_commission = premise_errors["invalid"]
                 visible_main_keys = [key for key in main_keys if not core.is_anagraphic_field(key)]
@@ -1296,8 +1352,13 @@ if page == "single":
                                 invalidate_session_profiles_cache()
                                 st.success("Anagrafica salvata nell'archivio.")
 
-                output_format = _render_output_format_selector("single_output_format")
-                if st.button("Genera documento", type="primary", disabled=invalid_commission):
+                output_format = st.session_state.pop("single_format_confirmed", None)
+                if generate_slot.button(
+                    "Genera documento", type="primary", disabled=invalid_commission,
+                    use_container_width=True,
+                ):
+                    _format_dialog("single_format_confirmed")
+                if output_format:
                     fields = [{"name": k, "tokens": t} for k, t in placeholders.items()]
                     with st.spinner("Generazione..."):
                         out = core.render(data, fields, values)
@@ -1630,6 +1691,11 @@ if page in ("excel", "manual"):
                     phase_action = None
                     add_or_remove = None
                     with st.form("mass_corporate_roles_form"):
+                        back_to_selection = st.form_submit_button(
+                            "← Torna alla selezione delle anagrafiche",
+                            on_click=_normalize_percentage_widgets,
+                            args=(percentage_keys, percentage_error_key),
+                        )
                         for option, company in selected_corporates:
                             company_name = core.record_label("giuridica", company)
                             with st.expander(
@@ -1757,11 +1823,6 @@ if page in ("excel", "manual"):
                                 ):
                                     add_or_remove = ("remove_te", option, te_slots[-1])
 
-                        back_to_selection = st.form_submit_button(
-                            "Torna alla selezione delle anagrafiche",
-                            on_click=_normalize_percentage_widgets,
-                            args=(percentage_keys, percentage_error_key),
-                        )
                         next_to_manual = st.form_submit_button(
                             "Conferma i ruoli e passa alla fase 3",
                             type="primary",
@@ -2059,10 +2120,22 @@ if page in ("excel", "manual"):
                     generate_clicked = False
                     back_to_roles = False
                     premise_save_request = None
+                    mass_output_format = st.session_state.pop("mass_format_confirmed", None)
                     mass_left, mass_right = st.columns([2, 3], gap="large")
                     with mass_left:
-                        mass_output_format = _render_output_format_selector("mass_output_format")
                         with st.form("mass_values_form"):
+                            top_left, top_right = st.columns([3, 1])
+                            back_to_roles = top_left.form_submit_button(
+                                "← Torna alla fase 2 — LR e TE",
+                                on_click=_save_mass_manual_values,
+                                args=(manual_widget_keys,),
+                            )
+                            generate_clicked = top_right.form_submit_button(
+                                "Genera i mandati",
+                                type="primary",
+                                use_container_width=True,
+                                disabled=invalid_bulk_fields or not mass_values_by_mandate,
+                            )
                             for (
                                 mandate, template, placeholders, values, label, manual_keys
                             ) in mass_values_by_mandate:
@@ -2094,6 +2167,7 @@ if page in ("excel", "manual"):
                                                     premise_by_id,
                                                     in_form=True,
                                                     field_initials=saved_manual_values,
+                                                    show_selector=page != "excel",
                                                 )
                                                 invalid_bulk_fields |= invalid_premise
                                                 if invalid_premise:
@@ -2125,21 +2199,11 @@ if page in ("excel", "manual"):
                                                 st.error(f"{field_label}: {error}")
                                     else:
                                         st.caption("Il modello non contiene variabili manuali.")
-                            back_to_roles = st.form_submit_button(
-                                "Torna alla fase 2 — LR e TE",
-                                on_click=_save_mass_manual_values,
-                                args=(manual_widget_keys,),
-                            )
                             st.form_submit_button("Aggiorna anteprima")
                             draft_save_clicked = _render_draft_save_controls(
                                 "mass_p3",
                                 on_click=_save_mass_manual_values,
                                 args=(manual_widget_keys,),
-                            )
-                            generate_clicked = st.form_submit_button(
-                                "Genera i mandati",
-                                type="primary",
-                                disabled=invalid_bulk_fields or not mass_values_by_mandate,
                             )
 
                     _render_field_issues(
@@ -2265,6 +2329,12 @@ if page in ("excel", "manual"):
                             and not invalid_bulk_fields
                             and not missing_required
                         ):
+                            _format_dialog("mass_format_confirmed")
+                        if (
+                            mass_output_format
+                            and not invalid_bulk_fields
+                            and not missing_required
+                        ):
                             documents = []
                             used_names = set()
                             progress = st.progress(0.0, text="Generazione dei documenti...")
@@ -2309,8 +2379,9 @@ if page in ("excel", "manual"):
 
                         if (
                             st.session_state.get("mass_archive")
-                            and st.session_state.get("mass_archive_signature")
-                            == mass_signature + mass_output_format
+                            and str(st.session_state.get("mass_archive_signature", "")).startswith(
+                                mass_signature
+                            )
                         ):
                             st.download_button(
                                 "Scarica i mandati separati (ZIP)",
