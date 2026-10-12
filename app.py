@@ -1371,20 +1371,16 @@ if page == "single":
 
 if page in ("excel", "manual"):
     with tab_gen:
-        st.caption(
-            "Seleziona più anagrafiche: per ciascuna verrà creato un mandato separato. "
-            "I codici fiscali che iniziano con una lettera sono persone fisiche; "
-            "quelli che iniziano con un numero sono persone giuridiche."
-        )
-
         mass_templates = {}
-        for customer_type, label in core.CUSTOMER_TYPES.items():
-            with st.expander(f"Modello {label.lower()}", expanded=False):
-                uploaded_template = st.file_uploader(
-                    f"Modello locale {label.lower()} (.doc / .docx)",
+        with st.popover("Carica modello"):
+            for customer_type, label in core.CUSTOMER_TYPES.items():
+                st.file_uploader(
+                    f"Modello {label.lower()} (.doc / .docx)",
                     type=["doc", "docx"],
                     key=f"mass_template_{customer_type}",
                 )
+        for customer_type, label in core.CUSTOMER_TYPES.items():
+            uploaded_template = st.session_state.get(f"mass_template_{customer_type}")
             try:
                 if uploaded_template:
                     template_name = uploaded_template.name
@@ -1395,7 +1391,6 @@ if page in ("excel", "manual"):
                         supabase_url, supabase_service_role_key, templates_bucket, customer_type
                     )
                     template_format = template_name.rsplit(".", 1)[-1].lower()
-                    st.caption(f"Modello {label.lower()} caricato da Supabase: {template_name}")
                 else:
                     continue
                 docx_template, template_placeholders = cached_mass_template(
