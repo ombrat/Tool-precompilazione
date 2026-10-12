@@ -918,7 +918,7 @@ MAIN_PAGES = ("single", "excel", "manual")
 page = st.session_state.get("gen_mode")
 if page not in PAGES:
     page = None
-tab_gen = st.container()
+tab_gen = st.container(key="gen_tab")
 
 if notice := st.session_state.pop("premise_archive_notice", None):
     st.success(notice)
@@ -2124,18 +2124,23 @@ if page in ("excel", "manual"):
                     mass_left, mass_right = st.columns([2, 3], gap="large")
                     with mass_left:
                         with st.form("mass_values_form"):
-                            top_left, top_right = st.columns([3, 1])
-                            back_to_roles = top_left.form_submit_button(
+                            st.markdown(
+                                "<style>.st-key-gen_tab { position: relative; }"
+                                ".st-key-mass_generate_top { position: absolute; top: 0; "
+                                "right: 0; width: auto; z-index: 5; }</style>",
+                                unsafe_allow_html=True,
+                            )
+                            back_to_roles = st.form_submit_button(
                                 "← Torna alla fase 2 — LR e TE",
                                 on_click=_save_mass_manual_values,
                                 args=(manual_widget_keys,),
                             )
-                            generate_clicked = top_right.form_submit_button(
-                                "Genera i mandati",
-                                type="primary",
-                                use_container_width=True,
-                                disabled=invalid_bulk_fields or not mass_values_by_mandate,
-                            )
+                            with st.container(key="mass_generate_top"):
+                                generate_clicked = st.form_submit_button(
+                                    "Genera i mandati",
+                                    type="primary",
+                                    disabled=invalid_bulk_fields or not mass_values_by_mandate,
+                                )
                             for (
                                 mandate, template, placeholders, values, label, manual_keys
                             ) in mass_values_by_mandate:
