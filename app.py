@@ -653,7 +653,7 @@ def _render_checklist_import(bulk_records, mass_templates):
                     f"Importa solo le righe con «{headers[status_col]}»",
                     statuses,
                     default=statuses,
-                    key=f"cl_status_{file_id}",
+                    key=f"cl_status_{file_id}_{core._norm('|'.join(statuses))}",
                 ))
 
         candidates = [
