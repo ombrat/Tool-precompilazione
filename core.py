@@ -594,6 +594,7 @@ CHECKLIST_NAME_HEADERS = {
     "cliente", "nominativo", "ragione sociale", "denominazione", "nome", "soggetto",
     "societa", "intestatario", "anagrafica",
 }
+CHECKLIST_SURNAME_HEADERS = {"cognome", "surname", "last name"}
 CHECKLIST_FISCAL_CODE_HEADERS = {"codice fiscale", "cf"}
 CHECKLIST_STATUS_HEADERS = {"stato"}
 
@@ -683,6 +684,14 @@ def find_checklist_column(headers, wanted):
         if fold_text(header) in wanted:
             return index
     return None
+
+
+def checklist_person_name(headers, cells):
+    name_column = find_checklist_column(headers, CHECKLIST_NAME_HEADERS)
+    surname_column = find_checklist_column(headers, CHECKLIST_SURNAME_HEADERS)
+    name = cells[name_column] if name_column is not None else ""
+    surname = cells[surname_column] if surname_column is not None else ""
+    return " ".join(part for part in (surname, name) if part)
 
 
 def is_checklist_total_row(name):

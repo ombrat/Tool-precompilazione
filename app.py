@@ -590,9 +590,12 @@ def _render_checklist_import(bulk_records, mass_templates):
             return
         headers = checklist["headers"]
         name_col = core.find_checklist_column(headers, core.CHECKLIST_NAME_HEADERS)
+        surname_col = core.find_checklist_column(
+            headers, core.CHECKLIST_SURNAME_HEADERS
+        )
         cf_col = core.find_checklist_column(headers, core.CHECKLIST_FISCAL_CODE_HEADERS)
         status_col = core.find_checklist_column(headers, core.CHECKLIST_STATUS_HEADERS)
-        if name_col is None and cf_col is None:
+        if name_col is None and surname_col is None and cf_col is None:
             st.error(
                 "Non trovo la colonna del nominativo: usa un'intestazione come "
                 "«Cliente», «Nominativo» o «Ragione sociale» (oppure «Codice fiscale»)."
@@ -661,7 +664,7 @@ def _render_checklist_import(bulk_records, mass_templates):
         report, matched = [], {}
         for row in checklist["rows"]:
             cells = row["cells"]
-            name = cells[name_col] if name_col is not None else ""
+            name = core.checklist_person_name(headers, cells)
             fiscal_code = cells[cf_col] if cf_col is not None else ""
             if (not name and not fiscal_code) or core.is_checklist_total_row(name):
                 continue

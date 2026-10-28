@@ -51,6 +51,28 @@ class ChecklistTests(unittest.TestCase):
         self.assertEqual(core.match_checklist_row(index, "bimbi srl"), ("similar", ["c"]))
         self.assertEqual(core.match_checklist_row(index, "sconosciuto spa"), ("missing", []))
 
+    def test_matches_person_from_separate_surname_and_name_columns(self):
+        headers = ["Cognome", "Nome", "Importo"]
+        cells = ["Rossi", "Mario", "100"]
+        candidates = [
+            ("fisica:cf:rssmra80a01h501u", "fisica",
+             {"Codice Fiscale": "RSSMRA80A01H501U"}, "Rossi Mario")
+        ]
+        index = core.build_record_index(candidates)
+
+        name = core.checklist_person_name(headers, cells)
+
+        self.assertEqual(name, "Rossi Mario")
+        self.assertEqual(core.match_checklist_row(index, name), ("ok", [
+            "fisica:cf:rssmra80a01h501u"
+        ]))
+
+    def test_preserves_single_nominative_column(self):
+        self.assertEqual(
+            core.checklist_person_name(["Cliente"], ["Mario Rossi"]),
+            "Mario Rossi",
+        )
+
     def test_column_mapping_and_values(self):
         headers = [
             "# Mandato", "Cliente", "Capitale Sociale", "% capitale sociale",
