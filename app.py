@@ -642,13 +642,13 @@ def _render_checklist_import(bulk_records, mass_templates):
                 if chosen is not None:
                     mapping[norm_name] = chosen
 
+        blank_status = "(vuoto)"
         status_filter = None
         if status_col is not None:
             statuses = list(dict.fromkeys(
-                row["cells"][status_col] for row in checklist["rows"]
-                if row["cells"][status_col]
+                row["cells"][status_col] or blank_status for row in checklist["rows"]
             ))
-            if statuses:
+            if len(statuses) > 1 or statuses[:1] not in ([], [blank_status]):
                 status_filter = set(st.multiselect(
                     f"Importa solo le righe con «{headers[status_col]}»",
                     statuses,
@@ -666,11 +666,32 @@ def _render_checklist_import(bulk_records, mass_templates):
             cells = row["cells"]
             name = core.checklist_person_name(headers, cells)
             fiscal_code = cells[cf_col] if cf_col is not None else ""
-            if (not name and not fiscal_code) or core.is_checklist_total_row(name):
+            if core.is_checklist_total_row(name):
+                continue
+            if not name and not fiscal_code:
+                if any(cells):
+                    report.append(
+                        {
+                            "Riga": row["row"],
+                            "Nominativo in lista": "",
+                            "Tipo": "",
+                            "Anagrafica trovata": "",
+                            "Esito": "⚠️ Nominativo vuoto: riga ignorata",
+                        }
+                    )
                 continue
             if status_filter is not None and status_col is not None and (
-                cells[status_col] not in status_filter
+                (cells[status_col] or blank_status) not in status_filter
             ):
+                report.append(
+                    {
+                        "Riga": row["row"],
+                        "Nominativo in lista": name or fiscal_code,
+                        "Tipo": "",
+                        "Anagrafica trovata": "",
+                        "Esito": f"⏭️ Esclusa dal filtro «{headers[status_col]}»",
+                    }
+                )
                 continue
             outcome, options = core.match_checklist_row(index, name, fiscal_code)
             found_type, found_label, note = "", "", ""
